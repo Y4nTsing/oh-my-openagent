@@ -1,5 +1,6 @@
 declare const require: (name: string) => any
 const { describe, test, expect } = require("bun:test")
+const { withAdvancingClock } = require("../../../../../test-support/advancing-clock")
 
 function createMockCtx(aborted = false) {
   const controller = new AbortController()
@@ -29,21 +30,6 @@ function createStalledClient(
       status: async () => ({ data: { [sessionID]: { type: "idle" } } }),
     },
   }
-}
-
-type TestClock = {
-  readonly now: () => number
-  readonly wait: (milliseconds: number) => Promise<void>
-}
-
-async function withAdvancingClock(stepMs: number, run: (clock: TestClock) => Promise<void>) {
-  let currentTime = 0
-  const now = () => {
-    const current = currentTime
-    currentTime += stepMs
-    return current
-  }
-  await run({ now, wait: async () => {} })
 }
 
 describe.serial("sync session poll stall detection", () => {
@@ -359,6 +345,56 @@ describe.serial("sync session poll stall detection", () => {
           expect(result).toContain("Poll inactivity timeout reached")
           expect(result).not.toContain("Subagent stalled")
         })
+      })
+    })
+
+    describe("#when a short status outage interrupts an accumulated stall window", () => {
+      test("#then the outage resets the timer and the stall waits for a fresh window after recovery", async () => {
+        // Timing: each now() call adds 1000ms and a poll round advances the
+        // clock by ~2s (inactiveElapsed + stallNow). With stallTimeoutMs=30s:
+        //   - idle polls 1..14 accumulate stallSince at poll ~2 (t≈4s); by poll
+        //     14 the window is 28-4=24s: close to but not yet the 30s threshold.
+        //   - polls 15..16: status THROWS. The staleness guard would `continue`
+        //     (no revision -> statusChanged=false) WITHOUT the pre-guard reset,
+        //     preserving the stale 24s window.
+        //   - poll 17: idle with a NEW revision -> guard breaks through.
+        //     WITHOUT the pre-guard reset: stallNow-stallSince ≈ 34-4 = 30s ->
+        //     fires immediately at the recovery poll (statusCallCount 17).
+        //     WITH it: stallSince was reset during the outage (stallSince=0
+        //     each throw poll), so poll 17 restarts from ~t=34s and the stall
+        //     needs another ~30s (statusCallCount ~30).
+        const { pollSyncSession } = require("./sync-session-poller")
+        let statusCallCount = 0
+        let ticks = 0
+        const now = () => {
+          const t = ticks
+          ticks += 1_000
+          return t
+        }
+        const client = createStalledClient("ses_outage_recovery", "unknown", [])
+        client.session.status = async () => {
+          statusCallCount++
+          if (statusCallCount >= 15 && statusCallCount <= 16) {
+            throw new Error("status unavailable")
+          }
+          return { data: { ses_outage_recovery: { type: "idle", revision: statusCallCount } } }
+        }
+
+        const result = await pollSyncSession(createMockCtx(), client, {
+          sessionID: "ses_outage_recovery",
+          agentToUse: "test-agent",
+          toastManager: null,
+          taskId: undefined,
+          stallTimeoutMs: 30_000,
+          now,
+          wait: async () => {},
+        }, 300_000)
+
+        expect(result).toContain("Subagent stalled")
+        // The stall must NOT fire at the first recovery poll (17) using the
+        // pre-outage window; it restarts, so completion comes only after a
+        // fresh ~30s window (statusCallCount ~30).
+        expect(statusCallCount).toBeGreaterThanOrEqual(25)
       })
     })
 

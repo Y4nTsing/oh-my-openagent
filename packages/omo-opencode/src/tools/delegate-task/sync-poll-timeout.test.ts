@@ -1,6 +1,7 @@
 declare const require: (name: string) => any
 const { describe, test, expect, beforeEach, afterEach } = require("bun:test")
 import { __setTimingConfig, __resetTimingConfig, getTimingConfig } from "./timing"
+import { withAdvancingClock } from "../../../../../test-support/advancing-clock"
 
 function createMockCtx(aborted = false) {
   const controller = new AbortController()
@@ -25,21 +26,6 @@ function createNeverCompleteClient(sessionID: string, onAbort?: () => void) {
       status: async () => ({ data: { [sessionID]: { type: "idle" } } }),
     },
   }
-}
-
-type TestClock = {
-  readonly now: () => number
-  readonly wait: (milliseconds: number) => Promise<void>
-}
-
-async function withAdvancingClock(stepMs: number, run: (clock: TestClock) => Promise<void>) {
-  let currentTime = 0
-  const now = () => {
-    const current = currentTime
-    currentTime += stepMs
-    return current
-  }
-  await run({ now, wait: async () => {} })
 }
 
 describe("syncPollTimeoutMs threading", () => {
