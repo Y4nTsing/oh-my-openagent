@@ -224,6 +224,19 @@ export async function pollSyncSession(
       continue
     }
 
+    // A failed status observation must reset the stall timer: an unavailable
+    // observation is not evidence of an idle stall. But a SUCCESSFUL status
+    // response that omits the session IS one: real OpenCode drops idle
+    // sessions from the status map entirely (verified end-to-end on 1.18.15 —
+    // an interrupted-stream child settles idle, emits session.idle, and
+    // disappears from the map), so "absent from a successful response" is the
+    // real-world signal of a quiescent session, alongside an explicit "idle".
+    // This reset runs BEFORE the staleness dedup below so that guard's
+    // `continue` cannot preserve a pre-outage stall window through polls that
+    // produced no valid observation at all.
+    const hasKnownInactiveStatus = !statusObservationFailed && (sessionStatus === undefined || isKnownInactiveSessionStatus(sessionStatus))
+    if (!hasKnownInactiveStatus) stallSince = 0
+
     nonActivePollsSinceMessageFetch++
     const statusRevision = sessionStatus && (sessionStatus.updatedAt ?? sessionStatus.revision ?? sessionStatus.messageCount)
     const statusChanged = statusRevision !== undefined && String(statusRevision) !== lastStatusRevision
@@ -233,16 +246,6 @@ export async function pollSyncSession(
     lastStatusRevision = statusRevision === undefined ? lastStatusRevision : String(statusRevision)
     nonActivePollsSinceMessageFetch = 0
     hasFetchedNonActiveMessages = true
-
-    // A failed status observation must reset the stall timer: an unavailable
-    // observation is not evidence of an idle stall. But a SUCCESSFUL status
-    // response that omits the session IS one: real OpenCode drops idle
-    // sessions from the status map entirely (verified end-to-end on 1.18.15 —
-    // an interrupted-stream child settles idle, emits session.idle, and
-    // disappears from the map), so "absent from a successful response" is the
-    // real-world signal of a quiescent session, alongside an explicit "idle".
-    const hasKnownInactiveStatus = !statusObservationFailed && (sessionStatus === undefined || isKnownInactiveSessionStatus(sessionStatus))
-    if (!hasKnownInactiveStatus) stallSince = 0
 
     let messages: SessionMessage[]
     try {
