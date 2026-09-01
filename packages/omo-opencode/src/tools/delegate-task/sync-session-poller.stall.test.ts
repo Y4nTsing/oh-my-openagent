@@ -150,6 +150,73 @@ describe("sync session poll stall detection", () => {
       })
     })
 
+    describe("#when the session is waiting on its own background children", () => {
+      test("#then stall detection does NOT fire (session is legitimately quiescent)", async () => {
+        const { pollSyncSession } = require("./sync-session-poller")
+        const client = createStalledClient("ses_child_wait", "unknown", [])
+
+        await withMockedDateNow(60_000, async () => {
+          const result = await pollSyncSession(createMockCtx(), client, {
+            sessionID: "ses_child_wait",
+            agentToUse: "test-agent",
+            toastManager: null,
+            taskId: undefined,
+            stallTimeoutMs: 30_000,
+            hasActiveChildBackgroundTasks: () => true,
+          }, 120_000)
+
+          expect(result).toContain("Poll inactivity timeout reached")
+          expect(result).not.toContain("Subagent stalled")
+        })
+      })
+    })
+
+    describe("#when the session becomes active again during the stall window", () => {
+      test("#then the stall timer resets and requires a fresh contiguous idle window", async () => {
+        const { pollSyncSession } = require("./sync-session-poller")
+        let abortCount = 0
+        let messageCallCount = 0
+        const statusSequence: string[] = ["idle", "idle", "active", "idle", "idle", "idle"]
+        let statusCallCount = 0
+        const client = createStalledClient("ses_active_reset", "unknown", [])
+        client.session.abort = async () => {
+          abortCount++
+        }
+        client.session.status = async () => {
+          statusCallCount++
+          const type = statusSequence[statusCallCount - 1] ?? "idle"
+          return { data: { ses_active_reset: { type } } }
+        }
+        client.session.messages = async () => {
+          messageCallCount++
+          return {
+            data: [
+              { info: { id: "msg_001", role: "user", time: { created: 1000 } } },
+              { info: { id: "msg_002", role: "assistant", time: { created: 2000 }, finish: "unknown" }, parts: [] },
+            ],
+          }
+        }
+
+        // 10s per poll. Without the active-state reset the stall would fire on
+        // the 4th poll; with the reset it needs a fresh 30s contiguous idle
+        // window and fires later, proving active periods do not count toward
+        // the stall timeout.
+        await withMockedDateNow(10_000, async () => {
+          const result = await pollSyncSession(createMockCtx(), client, {
+            sessionID: "ses_active_reset",
+            agentToUse: "test-agent",
+            toastManager: null,
+            taskId: undefined,
+            stallTimeoutMs: 30_000,
+          })
+
+          expect(result).toContain("Subagent stalled")
+          expect(abortCount).toBe(1)
+          expect(messageCallCount).toBeGreaterThan(3)
+        })
+      })
+    })
+
     describe("#when new messages arrive during the stall window", () => {
       test("#then the stall timer resets and poll keeps waiting", async () => {
         const { pollSyncSession } = require("./sync-session-poller")

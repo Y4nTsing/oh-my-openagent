@@ -192,6 +192,7 @@ export async function pollSyncSession(
 
     if (isActiveSessionStatus(sessionStatus)) {
       inactiveStart = Date.now()
+      stallSince = 0
       continue
     }
 
@@ -242,17 +243,24 @@ export async function pollSyncSession(
     // Note: a missing finish (undefined) is deliberately NOT stall-detected -
     // it can transiently appear while a subagent is mid-generation, and
     // aborting such a session would kill a healthy task.
+    //
+    // Sessions waiting on their own background children (or a pending parent
+    // wake) are also NOT stall-detected: like the isSessionComplete branch
+    // above, they are legitimately quiescent while child work is in flight.
     const lastAssistantForStall = [...messages].reverse().find((m) => m.info?.role === "assistant")
     const lastFinishForStall = lastAssistantForStall?.info?.finish
     if (
       !isActiveSessionStatus(sessionStatus) &&
       lastFinishForStall === "unknown" &&
-      messages.length === stallSeenCount
+      messages.length === stallSeenCount &&
+      !isAwaitingChildContinuation(lastAssistantForStall?.info?.id)
     ) {
       const stallNow = Date.now()
       stallSince ||= stallNow
       if (stallNow - stallSince >= stallTimeoutMs) {
-        const hasDeliverable = messages.some((m) => {
+        const deliverableMessages =
+          input.anchorMessageCount !== undefined ? messages.slice(input.anchorMessageCount) : messages
+        const hasDeliverable = deliverableMessages.some((m) => {
           if (m.info?.role !== "assistant") return false
           const parts = m.parts ?? []
           return parts.some((p) => {
