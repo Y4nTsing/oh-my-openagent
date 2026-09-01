@@ -23,12 +23,25 @@ if (MODE !== "DELIVERABLE" && MODE !== "EMPTY") {
   console.error(`[e2e] invalid mode ${MODE}; use DELIVERABLE or EMPTY`)
   process.exit(1)
 }
-const WORKTREE = process.argv[3] ?? process.env.OMO_WORKTREE ?? resolve(".")
-const OC_EXE = process.env.OPENCODE_EXE ?? (process.env.APPDATA + "/npm/node_modules/opencode-ai/bin/opencode.exe")
+// Resolve any relative worktree (argv/env) against cwd before building the
+// file:// plugin URI below.
+const WORKTREE = resolve(process.argv[3] ?? process.env.OMO_WORKTREE ?? resolve("."))
+// POSIX/macOS: rely on the PATH-installed `opencode`; Windows: fall back to the
+// npm-global path used by the workflow that produced the evidence.
+const OC_EXE =
+  process.env.OPENCODE_EXE ??
+  (process.platform === "win32"
+    ? (process.env.APPDATA + "/npm/node_modules/opencode-ai/bin/opencode.exe")
+    : "opencode")
 const MOCK_PORT = Number(process.env.MOCK_PORT ?? 8790)
 const SERVER_PORT = 8797
 const PASSWORD = "stall-evidence-pw"
 const DEADLINE_MS = 400_000
+
+if (process.platform === "win32" && !existsSync(OC_EXE)) {
+  console.error(`[e2e:${MODE}] opencode binary not found at ${OC_EXE} (set OPENCODE_EXE or install opencode-ai@1.18.15)`)
+  process.exit(1)
+}
 
 // sanity: the source plugin must exist at the worktree path we claim to load.
 if (!existsSync(join(WORKTREE, "packages", "omo-opencode", "src", "index.ts"))) {
@@ -159,8 +172,23 @@ try {
     return r.json()
   }
 
-  const createRes = await fetch(`${base}/session`, { method: "POST", headers: H, body: JSON.stringify({ title: `stall-e2e-${MODE}` }) })
-  const sid = (await createRes.json())?.id
+  // The HTTP API can accept /doc before the app is fully bootstrapped (plugin
+  // load, skills index). Retry session creation briefly so a slow first boot
+  // does not fail the run.
+  let createRes
+  let sid
+  for (let attempt = 1; attempt <= 10; attempt++) {
+    try {
+      createRes = await fetch(`${base}/session`, { method: "POST", headers: H, body: JSON.stringify({ title: `stall-e2e-${MODE}` }) })
+      const createdJson = await createRes.json()
+      sid = createdJson?.id
+      if (sid) break
+    } catch { /* not ready yet */ }
+    await sleep(2000)
+  }
+  if (!sid) {
+    throw new Error(`session creation failed after retries (last status ${createRes?.status ?? "n/a"})`)
+  }
   console.log(`[e2e:${MODE}] parent session ${sid}`)
 
   const promptT0 = Date.now()
