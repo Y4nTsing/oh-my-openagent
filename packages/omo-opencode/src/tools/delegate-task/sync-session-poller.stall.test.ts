@@ -201,7 +201,10 @@ describe.serial("sync session poll stall detection", () => {
           client.session.status = async () => {
             statusCallCount++
             const type = statusSequence[statusCallCount - 1] ?? "idle"
-            return { data: { ses_active_reset: { type } } }
+            // A real opencode status observation carries an increasing revision;
+            // without it the poller's staleness dedup would skip message fetches
+            // and the mock timeline below would not be exercised as intended.
+            return { data: { ses_active_reset: { type, revision: statusCallCount } } }
           }
           client.session.messages = async () => {
             messageCallCount++
@@ -249,7 +252,10 @@ describe.serial("sync session poll stall detection", () => {
               if (unavailableKind === "throw") throw new Error("status unavailable")
               return { data: {} }
             }
-            return { data: { ses_status_unavailable: { type: "idle" } } }
+            // Carry an increasing revision (as real opencode status does) so the
+            // poller's staleness dedup keeps fetching messages after the
+            // transient outage.
+            return { data: { ses_status_unavailable: { type: "idle", revision: statusCallCount } } }
           }
           client.session.messages = async () => {
             messageCallCount++
@@ -260,7 +266,7 @@ describe.serial("sync session poll stall detection", () => {
             return { data: [{ info: { id: "msg_001", role: "user", time: { created: 1000 } } }, assistant] }
           }
 
-          await withAdvancingClock(10_000, async (clock) => {
+          await withAdvancingClock(1_000, async (clock) => {
             const result = await pollSyncSession(createMockCtx(), client, {
               sessionID: "ses_status_unavailable",
               agentToUse: "test-agent",
