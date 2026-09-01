@@ -196,6 +196,7 @@ export async function pollSyncSession(
     pollCount++
 
     let sessionStatus: ({ type: string; updatedAt?: string | number; revision?: string | number; messageCount?: number } & Record<string, unknown>) | undefined
+    let statusObservationFailed = false
     try {
       const statusResult = await client.session.status()
       const allStatuses = normalizeSDKResponse(statusResult, {} as Record<string, { type: string }>)
@@ -204,6 +205,7 @@ export async function pollSyncSession(
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error)
       log("[task] Poll status fetch failed, checking messages", { sessionID: input.sessionID, error: errorMessage })
+      statusObservationFailed = true
     }
 
     if (pollCount % 10 === 0) {
@@ -232,7 +234,14 @@ export async function pollSyncSession(
     nonActivePollsSinceMessageFetch = 0
     hasFetchedNonActiveMessages = true
 
-    const hasKnownInactiveStatus = isKnownInactiveSessionStatus(sessionStatus)
+    // A failed status observation must reset the stall timer: an unavailable
+    // observation is not evidence of an idle stall. But a SUCCESSFUL status
+    // response that omits the session IS one: real OpenCode drops idle
+    // sessions from the status map entirely (verified end-to-end on 1.18.15 —
+    // an interrupted-stream child settles idle, emits session.idle, and
+    // disappears from the map), so "absent from a successful response" is the
+    // real-world signal of a quiescent session, alongside an explicit "idle".
+    const hasKnownInactiveStatus = !statusObservationFailed && (sessionStatus === undefined || isKnownInactiveSessionStatus(sessionStatus))
     if (!hasKnownInactiveStatus) stallSince = 0
 
     let messages: SessionMessage[]

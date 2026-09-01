@@ -283,6 +283,85 @@ describe.serial("sync session poll stall detection", () => {
       )
     })
 
+    describe("#when a successful status response omits the session (real-world idle)", () => {
+      test("#then the stall timer accumulates and the poll fails fast", async () => {
+        // Real OpenCode (verified end-to-end on 1.18.15) drops idle sessions
+        // from the status map entirely: a session that settles idle after an
+        // interrupted stream is simply ABSENT from a successful response.
+        // Absent-from-success must therefore count as inactive.
+        const { pollSyncSession } = require("./sync-session-poller")
+        let abortCount = 0
+        const client = createStalledClient("ses_absent_idle", "unknown", [])
+        client.session.status = async () => ({ data: {} })
+        client.session.abort = async () => {
+          abortCount++
+        }
+
+        await withAdvancingClock(10_000, async (clock) => {
+          const result = await pollSyncSession(createMockCtx(), client, {
+            sessionID: "ses_absent_idle",
+            agentToUse: "test-agent",
+            toastManager: null,
+            taskId: undefined,
+            stallTimeoutMs: 30_000,
+            ...clock,
+          })
+
+          expect(result).toContain("Subagent stalled")
+          expect(abortCount).toBe(1)
+        })
+      })
+
+      test("#then a deliverable in the absent session is still handed back", async () => {
+        const { pollSyncSession } = require("./sync-session-poller")
+        const client = createStalledClient("ses_absent_deliverable", "unknown", [
+          { type: "text", text: "final answer" },
+        ])
+        client.session.status = async () => ({ data: {} })
+
+        await withAdvancingClock(10_000, async (clock) => {
+          const result = await pollSyncSession(createMockCtx(), client, {
+            sessionID: "ses_absent_deliverable",
+            agentToUse: "test-agent",
+            toastManager: null,
+            taskId: undefined,
+            stallTimeoutMs: 30_000,
+            ...clock,
+          })
+
+          expect(result).toBeNull()
+        })
+      })
+    })
+
+    describe("#when the status API throws on every observation", () => {
+      test("#then the stall timer never accumulates and the inactivity timeout still applies", async () => {
+        const { pollSyncSession } = require("./sync-session-poller")
+        let abortCount = 0
+        const client = createStalledClient("ses_status_throws", "unknown", [])
+        client.session.status = async () => {
+          throw new Error("status endpoint down")
+        }
+        client.session.abort = async () => {
+          abortCount++
+        }
+
+        await withAdvancingClock(60_000, async (clock) => {
+          const result = await pollSyncSession(createMockCtx(), client, {
+            sessionID: "ses_status_throws",
+            agentToUse: "test-agent",
+            toastManager: null,
+            taskId: undefined,
+            stallTimeoutMs: 30_000,
+            ...clock,
+          }, 120_000)
+
+          expect(result).toContain("Poll inactivity timeout reached")
+          expect(result).not.toContain("Subagent stalled")
+        })
+      })
+    })
+
     describe("#when status observation returns an unrecognized state", () => {
       test("#then it does not count as inactive while terminal-message detection remains available", async () => {
         const { pollSyncSession } = require("./sync-session-poller")
