@@ -13,15 +13,38 @@ no external API calls. Both required outcomes are proven with timings.
   `data: [DONE]` and NEVER carry a finish_reason, which opencode persists as
   `finish="unknown"` before the session settles idle. `CHILDPROBE EMPTY`
   streams zero text chunks (no-deliverable); `CHILDPROBE DELIVERABLE` streams
-  text (current-turn deliverable present).
+  text (current-turn deliverable present). Any unrecognized request shape
+  fails with HTTP 500 rather than fabricating a scenario.
 - `drive-stall.mjs` — spawns a real `opencode serve` in an isolated XDG sandbox
   with the source plugin (`file://.../packages/omo-opencode/src/index.ts`),
   routes the parent and the explore subagent at the mock, drives the parent
-  turn through `prompt_async`, and watches the task tool's result part and the
-  session status map until completion.
+  turn through `prompt_async`, and watches the task tool's result part until
+  completion. It asserts the opencode database is created INSIDE the sandbox
+  (isolation check), kills the server in a `finally` path, and exits 0 only
+  when the mode-specific outcome (deliverable handback / stall abort) is
+  observed; 1 on mismatch, timeout, or harness failure.
+- `status-map-absence-proof.txt` — 100ms-granularity status-map watch proving
+  idle sessions vanish from the map (`busy -> (absent)`,
+  `SAW_IDLE_IN_MAP=false`).
 
-Run: `node drive-stall.mjs DELIVERABLE` then `node drive-stall.mjs EMPTY`
-(requires the mock on 127.0.0.1:8790 and opencode 1.18.15 on PATH).
+## Run (reproducible)
+
+```bash
+# 1. start the mock provider
+node mock-openai.mjs &          # listens on 127.0.0.1:8790
+
+# 2. drive each scenario against a real opencode 1.18.15
+OMO_WORKTREE=/path/to/oh-my-openagent node drive-stall.mjs DELIVERABLE
+OMO_WORKTREE=/path/to/oh-my-openagent node drive-stall.mjs EMPTY
+```
+
+- `OMO_WORKTREE` (or argv[3]) points at the checked-out repository whose
+  `packages/omo-opencode/src/index.ts` is loaded as the plugin; the harness
+  fails fast if that file is missing.
+- Requires opencode-ai@1.18.15 (the incident version) on PATH; the binary can
+  be overridden with `OPENCODE_EXE`.
+- Each run keeps its sandbox (containing `serve.log`) unless
+  `OMO_CLEANUP_SANDBOX=1` is set.
 
 ## Findings
 
@@ -46,21 +69,25 @@ Run: `node drive-stall.mjs DELIVERABLE` then `node drive-stall.mjs EMPTY`
    detection matches real behavior while keeping the exception-safety
    semantics.
 
-3. **Both outcomes proven with the fix loaded:**
+3. **Both outcomes proven with the fix loaded** (hardened harness, exit 0):
    - Deliverable handback (`deliverable-output.txt`): task tool returned at
-     t+47s with `Task completed in 41s` and the child's current-turn text
-     (`child deliverable chunk-0 chunk-1`) handed back to the parent.
-   - No-deliverable abort (`empty-output.txt`): task tool returned at t+45s
+     **t+52s** (task: 46s) with `Task completed in 46s` and the child's
+     current-turn text (`child deliverable chunk-0 chunk-1`) handed back to
+     the parent.
+   - No-deliverable abort (`empty-output.txt`): task tool returned at **t+45s**
      with `Subagent stalled: session was inactive with finish="unknown" and
      produced no new messages for 30000ms. The model stream was likely
      interrupted.`
 
-   Both exits occur at ~45s (≈10s session setup + the 30s stall window)
+   Both exits land at ~45-52s: ~15-17s of setup/settling (session creation,
+   child stream, idle transition, plugin machinery) plus the 30s stall window —
    instead of the 30-minute inactivity timeout from the incident.
 
 ## Corresponding unit coverage
 
-`sync-session-poller.stall.test.ts` gains three cases mirroring these
-findings: a session absent from a successful status response stalls (no
-deliverable) and hands back (deliverable), while a status endpoint that
-throws on every observation never accumulates a stall.
+`sync-session-poller.stall.test.ts` gains cases mirroring these findings: a
+session absent from a successful status response stalls (no deliverable) and
+hands back (deliverable); a status endpoint that throws on every observation
+never accumulates a stall; and a short status outage interrupting an already
+accumulated stall window resets the window (a stale pre-outage window cannot
+fire on recovery).

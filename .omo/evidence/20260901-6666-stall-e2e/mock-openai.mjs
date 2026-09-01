@@ -44,7 +44,7 @@ function classify(body) {
   if (hasToolResult(body)) return "PARENT_FOLLOWUP"
   if (t.includes("PARENTDELEGATE")) return "PARENT_FIRST"
   if (t.includes("CHILDPROBE")) return t.includes("EMPTY") ? "CHILD_EMPTY" : "CHILD_DELIVERABLE"
-  return "CHILD_DELIVERABLE" // default: interrupted stream
+  return "UNKNOWN" // anything else: fail loudly, never fabricate a scenario
 }
 
 function send(res, pieces, intervalMs = 40) {
@@ -60,6 +60,13 @@ function send(res, pieces, intervalMs = 40) {
 function handleChat(body, res) {
   const kind = classify(body)
   console.log(`[mock] ${kind}`)
+
+  if (kind === "UNKNOWN") {
+    // Never fabricate a scenario from malformed input.
+    res.writeHead(500, { "Content-Type": "application/json" })
+    res.end(JSON.stringify({ error: { message: "mock provider: unrecognized request shape", type: "server_error" } }))
+    return
+  }
 
   res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" })
 
