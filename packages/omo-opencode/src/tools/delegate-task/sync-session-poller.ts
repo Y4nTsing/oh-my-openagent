@@ -7,6 +7,8 @@ import { normalizeSDKResponse } from "../../shared"
 
 export { isSessionComplete } from "./sync-session-turns"
 
+// allow: SIZE_OK - one polling state machine; splitting its timers and turn state would obscure ordering invariants.
+
 const ACTIVE_SESSION_STATUSES = new Set(["busy", "retry", "running"])
 const CHILD_WAKE_GRACE_MS = 5_000
 const MAX_NON_ACTIVE_STATUS_STALENESS_POLLS = 10
@@ -30,6 +32,26 @@ function abortSyncSession(client: OpencodeClient, sessionID: string, reason: str
 
 function isActiveSessionStatus(status: { type: string } | undefined): boolean {
   return status !== undefined && ACTIVE_SESSION_STATUSES.has(status.type)
+}
+
+function isKnownInactiveSessionStatus(status: { type: string } | undefined): boolean {
+  return status?.type === "idle"
+}
+
+function getStallProgressSignature(messages: SessionMessage[]): string {
+  return JSON.stringify([
+    messages.length,
+    ...messages.map((message) => [
+      message.info?.role === "assistant" ? message.info.id ?? null : null,
+      message.info?.role === "assistant" ? message.info.finish ?? null : null,
+      ...(message.parts ?? []).map((part) => [part.type ?? null, part.text ?? null]),
+    ]),
+  ])
+}
+
+function getCurrentTurnMessages(messages: SessionMessage[]): SessionMessage[] {
+  const latestUserIndex = messages.findLastIndex((message) => message.info?.role === "user")
+  return latestUserIndex < 0 ? [] : messages.slice(latestUserIndex + 1)
 }
 
 function hasMessagesAfterAnchor(
@@ -70,13 +92,17 @@ export async function pollSyncSession(
     hasPendingParentWake?: (sessionID: string) => boolean
     childWakeGraceMs?: number
     stallTimeoutMs?: number
+    now?: () => number
+    wait?: (milliseconds: number) => Promise<void>
   },
   timeoutMs?: number
 ): Promise<string | null> {
   const syncTiming = getTimingConfig()
   const maxPollTimeMs = Math.max(timeoutMs ?? getDefaultSyncPollTimeoutMs(), 50)
   const maxTurns = input.maxAssistantTurns ?? DEFAULT_MAX_ASSISTANT_TURNS
-  const pollStart = Date.now()
+  const now = input.now ?? Date.now
+  const waitForPoll = input.wait ?? wait
+  const pollStart = now()
   let inactiveStart = pollStart
   let pollCount = 0
   let nonActivePollsSinceMessageFetch = 0
@@ -85,7 +111,7 @@ export async function pollSyncSession(
   let timedOut = false
   let assistantTurnCount = 0
   let lastSeenAssistantId: string | undefined
-  let stallSeenCount: number | undefined
+  let stallProgressSignature: string | undefined
   let stallSince = 0
   const stallTimeoutMs = input.stallTimeoutMs ?? STALL_TIMEOUT_MS
   const childSettleMs = input.childWakeGraceMs ?? CHILD_WAKE_GRACE_MS
@@ -114,14 +140,14 @@ export async function pollSyncSession(
     if (childWaitAssistantId === undefined || currentAssistantId !== childWaitAssistantId) {
       return false
     }
-    childSettleStartedAt ||= Date.now()
-    return Date.now() - childSettleStartedAt < childSettleMs
+    childSettleStartedAt ||= now()
+    return now() - childSettleStartedAt < childSettleMs
   }
 
   log("[task] Starting poll loop", { sessionID: input.sessionID, agentToUse: input.agentToUse, maxTurns })
 
   while (true) {
-    const inactiveElapsedMs = Date.now() - inactiveStart
+    const inactiveElapsedMs = now() - inactiveStart
     if (inactiveElapsedMs >= maxPollTimeMs) {
       timedOut = true
       break
@@ -143,7 +169,7 @@ export async function pollSyncSession(
             error: errorMessage,
           })
           if (attempt < abortFetchAttempts) {
-            await wait(syncTiming.POLL_INTERVAL_MS)
+            await waitForPoll(syncTiming.POLL_INTERVAL_MS)
           }
         }
       }
@@ -166,7 +192,7 @@ export async function pollSyncSession(
       return `Task aborted.\n\nSession ID: ${input.sessionID}`
     }
 
-    await wait(syncTiming.POLL_INTERVAL_MS)
+    await waitForPoll(syncTiming.POLL_INTERVAL_MS)
     pollCount++
 
     let sessionStatus: ({ type: string; updatedAt?: string | number; revision?: string | number; messageCount?: number } & Record<string, unknown>) | undefined
@@ -184,14 +210,14 @@ export async function pollSyncSession(
       log("[task] Poll status", {
         sessionID: input.sessionID,
         pollCount,
-        elapsed: Math.floor((Date.now() - pollStart) / 1000) + "s",
+        elapsed: Math.floor((now() - pollStart) / 1000) + "s",
         inactiveElapsed: Math.floor(inactiveElapsedMs / 1000) + "s",
         sessionStatus: sessionStatus?.type ?? "not_in_status",
       })
     }
 
     if (isActiveSessionStatus(sessionStatus)) {
-      inactiveStart = Date.now()
+      inactiveStart = now()
       stallSince = 0
       continue
     }
@@ -205,6 +231,9 @@ export async function pollSyncSession(
     lastStatusRevision = statusRevision === undefined ? lastStatusRevision : String(statusRevision)
     nonActivePollsSinceMessageFetch = 0
     hasFetchedNonActiveMessages = true
+
+    const hasKnownInactiveStatus = isKnownInactiveSessionStatus(sessionStatus)
+    if (!hasKnownInactiveStatus) stallSince = 0
 
     let messages: SessionMessage[]
     try {
@@ -247,23 +276,24 @@ export async function pollSyncSession(
     // Sessions waiting on their own background children (or a pending parent
     // wake) are also NOT stall-detected: like the isSessionComplete branch
     // above, they are legitimately quiescent while child work is in flight.
-    const lastAssistantForStall = [...messages].reverse().find((m) => m.info?.role === "assistant")
+    const relevantMessages =
+      input.anchorMessageCount !== undefined ? messages.slice(input.anchorMessageCount) : messages
+    const progressSignature = getStallProgressSignature(relevantMessages)
+    const currentTurnMessages = getCurrentTurnMessages(relevantMessages)
+    const lastAssistantForStall = currentTurnMessages.findLast((m) => m.info?.role === "assistant")
     const lastFinishForStall = lastAssistantForStall?.info?.finish
     if (
-      !isActiveSessionStatus(sessionStatus) &&
+      hasKnownInactiveStatus &&
       lastFinishForStall === "unknown" &&
-      messages.length === stallSeenCount &&
+      progressSignature === stallProgressSignature &&
       !isAwaitingChildContinuation(lastAssistantForStall?.info?.id)
     ) {
-      const stallNow = Date.now()
+      const stallNow = now()
       stallSince ||= stallNow
       if (stallNow - stallSince >= stallTimeoutMs) {
-        const deliverableMessages =
-          input.anchorMessageCount !== undefined ? messages.slice(input.anchorMessageCount) : messages
-        const hasDeliverable = deliverableMessages.some((m) => {
-          if (m.info?.role !== "assistant") return false
-          const parts = m.parts ?? []
-          return parts.some((p) => {
+        const hasDeliverable = currentTurnMessages.some((message) => {
+          if (message.info?.role !== "assistant") return false
+          return (message.parts ?? []).some((p) => {
             if (p.type !== "text" && p.type !== "reasoning") return false
             return (p.text ?? "").trim().length > 0
           })
@@ -278,7 +308,7 @@ export async function pollSyncSession(
         log("[task] Poll stalled - no deliverable, failing fast", {
           sessionID: input.sessionID,
           pollCount,
-          stallMs: Date.now() - stallSince,
+          stallMs: now() - stallSince,
         })
         abortSyncSession(client, input.sessionID, "stall_timeout")
         if (input.toastManager && input.taskId) input.toastManager.removeTask(input.taskId)
@@ -286,8 +316,8 @@ export async function pollSyncSession(
       }
     } else {
       stallSince = 0
-      stallSeenCount = messages.length
     }
+    stallProgressSignature = progressSignature
 
     // Count new assistant turns to circuit-break infinite loops
     const lastAssistant = [...messages].reverse().find((m) => m.info?.role === "assistant")
