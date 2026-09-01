@@ -1,6 +1,6 @@
 import type { CapturedConversation, DreamOrigin } from "@oh-my-opencode/memory-core"
 
-import { loadConversations as defaultLoadConversations, selectLoadedConversations, type LoadedConversation } from "./dream-selector"
+import { computeUnreflectedVolumeFast, loadConversations as defaultLoadConversations, selectLoadedConversations, type LoadedConversation } from "./dream-selector"
 import { evaluateDreamGates, readLastDreamAtMs, type DreamTriggerSettings } from "./dream-trigger-gates"
 import type { DreamFireOutcome, DreamTriggerSession, ManualDreamRequest } from "./dream-trigger"
 
@@ -17,8 +17,9 @@ export async function fireDream(input: {
   readonly loadConversations?: (transcriptsDir: string) => Promise<readonly LoadedConversation[]>
 }): Promise<DreamFireOutcome> {
   const { session, origin, settings, request, now } = input
-  const loadConversations = input.loadConversations ?? defaultLoadConversations
   const shouldLoadConversations = origin !== "pressure" && request.conversationIds === undefined
+  const loadConversations = input.loadConversations ?? ((transcriptsDir: string) =>
+    defaultLoadConversations(transcriptsDir, Math.max(settings.autoSelectMax * 4, 8)))
   let loadedConversations: readonly LoadedConversation[] | undefined
   const getLoadedConversations = async (): Promise<readonly LoadedConversation[]> => {
     loadedConversations ??= await loadConversations(session.identityPaths.transcripts)
@@ -32,8 +33,13 @@ export async function fireDream(input: {
     lastDreamAtMs: () => readLastDreamAtMs(session.identityPaths.runtime),
     unreflectedBytes: async () => {
       if (!shouldLoadConversations) return 0
-      const conversations = await getLoadedConversations()
-      return conversations.reduce((total, conversation) => total + conversation.totalBytes, 0)
+      return computeUnreflectedVolumeFast({
+        transcriptsDir: session.identityPaths.transcripts,
+        currentConversationId: session.conversationId,
+        autoSelectMax: settings.autoSelectMax,
+        autoSelectMaxBytes: settings.autoSelectMaxChars,
+        now: () => new Date(now()),
+      })
     },
   })
   if (!decision.allowed) return { fired: false, rejection: decision.rejection }
