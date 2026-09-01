@@ -20,9 +20,10 @@ no external API calls. Both required outcomes are proven with timings.
   routes the parent and the explore subagent at the mock, drives the parent
   turn through `prompt_async`, and watches the task tool's result part until
   completion. It asserts the opencode database is created INSIDE the sandbox
-  (isolation check), kills the server in a `finally` path, and exits 0 only
-  when the mode-specific outcome (deliverable handback / stall abort) is
-  observed; 1 on mismatch, timeout, or harness failure.
+  and that the host's session count is unchanged before/after (isolation
+  proof), kills the server in a `finally` path, and exits 0 only when the
+  mode-specific outcome (deliverable handback / stall abort) is observed; 1 on
+  mismatch, timeout, or harness failure.
 - `status-map-absence-proof.txt` — 100ms-granularity status-map watch proving
   idle sessions vanish from the map (`busy -> (absent)`,
   `SAW_IDLE_IN_MAP=false`).

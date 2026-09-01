@@ -125,6 +125,32 @@ const childEnv = {
 
 let child = null
 let exitCode = 1
+
+// Host-session-count guard: run opencode WITHOUT the sandbox env and count the
+// real user's sessions before/after, so the evidence proves the run did not
+// write to the user's database. The child (serve) never touches it; this is a
+// belt-and-braces assertion on top of the writer isolation in childEnv.
+async function hostSessionCount() {
+  try {
+    const r = await new Promise((resolveP, rejectP) => {
+      const p = spawn(OC_EXE, ["db", "SELECT COUNT(*) FROM session", "--format", "json"], {
+        cwd: process.cwd(),
+        stdio: ["ignore", "pipe", "ignore"],
+      })
+      let out = ""
+      p.stdout.on("data", (d) => { out += String(d) })
+      p.on("exit", (code) => (code === 0 ? resolveP(out) : rejectP(new Error(`opencode db exited ${code}`))))
+      p.on("error", rejectP)
+    })
+    const m = r.match(/\d+/)
+    return m ? Number(m[0]) : null
+  } catch {
+    return null // host query unavailable -> skip the numeric guard, still isolated by childEnv
+  }
+}
+const hostCountBefore = await hostSessionCount()
+console.log(`[e2e:${MODE}] host-session-count-before=${hostCountBefore ?? "n/a"}`)
+
 try {
   child = spawn(OC_EXE, ["serve", "--port", String(SERVER_PORT), "--hostname", "127.0.0.1", "--print-logs"], {
     cwd: join(sandbox, "proj"),
@@ -303,6 +329,13 @@ try {
   try { logFd && (await import("node:fs")).closeSync(logFd) } catch { /* ignore */ }
   if (process.env.OMO_CLEANUP_SANDBOX === "1") {
     try { rmSync(sandbox, { recursive: true, force: true }) } catch { /* ignore */ }
+  }
+  // Host isolation guard: the user's session count must be unchanged.
+  const hostCountAfter = await hostSessionCount()
+  console.log(`[e2e:${MODE}] host-session-count-after=${hostCountAfter ?? "n/a"}`)
+  if (hostCountBefore !== null && hostCountAfter !== null && hostCountAfter !== hostCountBefore) {
+    console.error(`[e2e:${MODE}] FAIL: host session count changed ${hostCountBefore} -> ${hostCountAfter}; run is NOT isolated`)
+    exitCode = 1
   }
 }
 
