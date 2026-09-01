@@ -365,12 +365,7 @@ describe.serial("sync session poll stall detection", () => {
         //     needs another ~30s (statusCallCount ~30).
         const { pollSyncSession } = require("./sync-session-poller")
         let statusCallCount = 0
-        let ticks = 0
-        const now = () => {
-          const t = ticks
-          ticks += 1_000
-          return t
-        }
+        let result
         const client = createStalledClient("ses_outage_recovery", "unknown", [])
         client.session.status = async () => {
           statusCallCount++
@@ -380,15 +375,16 @@ describe.serial("sync session poll stall detection", () => {
           return { data: { ses_outage_recovery: { type: "idle", revision: statusCallCount } } }
         }
 
-        const result = await pollSyncSession(createMockCtx(), client, {
-          sessionID: "ses_outage_recovery",
-          agentToUse: "test-agent",
-          toastManager: null,
-          taskId: undefined,
-          stallTimeoutMs: 30_000,
-          now,
-          wait: async () => {},
-        }, 300_000)
+        await withAdvancingClock(1_000, async (clock) => {
+          result = await pollSyncSession(createMockCtx(), client, {
+            sessionID: "ses_outage_recovery",
+            agentToUse: "test-agent",
+            toastManager: null,
+            taskId: undefined,
+            stallTimeoutMs: 30_000,
+            ...clock,
+          }, 300_000)
+        })
 
         expect(result).toContain("Subagent stalled")
         // The stall must NOT fire at the first recovery poll (17) using the
