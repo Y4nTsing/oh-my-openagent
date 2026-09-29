@@ -1,9 +1,11 @@
 import type { ManagedChildHandle } from "../manager/child-handle"
-import type { DetachedRevivalResult, DetachedRevivalRollbackResult } from "../lifecycle/port"
-import type { TaskRecord, TaskRunStats, TaskStatus } from "../state"
+import type { ColdRevivalFailureCode, DetachedRevivalResult, DetachedRevivalRollbackResult } from "../lifecycle/port"
+import type { HostSessionIdentity, TaskRecord, TaskRunStats, TaskStatus } from "../state"
 import type { TaskRecordStore } from "../store"
 
-export type DestructionCause = "cancel" | "cancel_without_abort" | "fallback_handoff" | "revive_failure"
+// `reconcile_lost`: a child whose handle cleanup rejected is recorded on its terminal record and ended
+// through the lifecycle's orphan path (pid signal or daemon session close).
+export type DestructionCause = "cancel" | "cancel_without_abort" | "fallback_handoff" | "revive_failure" | "reconcile_lost"
 
 // Structural port implemented by lifecycle (todo 12). Steering delegates ALL child destruction here
 // and NEVER calls dispose()/terminate()/SIGTERM itself (the dispose single-writer rule). Idempotent.
@@ -27,6 +29,9 @@ export type SteeringPort = {
   reserveForRevive(taskId: string): ReviveReservation
   reserveForDetachedRevive?(record: TaskRecord): ReviveReservation
   reviveDetached?(taskId: string, reservation?: ReviveReservation): Promise<DetachedRevivalResult>
+  // Whether the daemon hosting a parked child still answers. Absent when this process has no
+  // daemon view at all, which reads as "unreachable" - the conservative answer.
+  isDaemonReachable?(hostSession: HostSessionIdentity): boolean
   rollbackDetachedRevival?(prior: TaskRecord): DetachedRevivalRollbackResult
   readonly destruction: DestructionPort
   // Snapshot of the manager-owned run-stats accumulator for a live task, attached to the cancel
@@ -51,6 +56,7 @@ export type SendInput = {
 export const DEFAULT_SEND_DELIVERY: SendDelivery = "followUp"
 
 export type SendOutcome =
+  | { readonly kind: ColdRevivalFailureCode; readonly task_id: string; readonly reason: string }
   | { readonly kind: "steered"; readonly task_id: string; readonly status: TaskStatus; readonly delivered: SendDelivery }
   | { readonly kind: "revived"; readonly task_id: string; readonly run_epoch: number }
   | {
@@ -85,7 +91,8 @@ export type CancelOutcome =
 
 export type SteeringEngine = {
   hasPendingSends(taskId: string): boolean
-  sendToTask(input: SendInput): Promise<SendOutcome>
+  // Internal manager grant consumption; ordinary task_send callers never supply a reservation.
+  sendToTask(input: SendInput, reservation?: ReviveReservation): Promise<SendOutcome>
   interruptTask(idOrName: string): Promise<InterruptOutcome>
   cancelTask(idOrName: string, reason?: string, options?: CancelOptions): Promise<CancelOutcome>
   // Called by the manager right after a queued child launches: drains ordered pending messages.

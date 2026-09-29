@@ -18,13 +18,14 @@ import { registerMemorySkillsScope } from "./skills-scope"
 import { registerSkillsUsage, type SkillsUsageTracker } from "./skills-usage"
 import { registerMemoryUsage, type MemoryUsageTracker } from "./memory-usage"
 import type { createMemoryNoticeWiring } from "./memory-notice-wiring"
-import type { MemorianGateWiring } from "./memorian-wiring"
+import type { KibitzerComposition } from "./kibitzer"
 import type { createMemoryRecallWiring } from "./recall-wiring"
 import { createReflectionTriggerWiring } from "./trigger-wiring"
 import { registerMemoryToolSurface } from "./tools"
 import {
   registerReflectionCompletionRenderer,
   registerReflectionHealthRenderer,
+  registerReflectionParkedRenderer,
   type ReflectionCompletionApi,
 } from "./worker"
 import { branchEntryCount, sessionIdFrom } from "./wiring-context"
@@ -32,6 +33,7 @@ import { registerMemoryWriteListener } from "./wiring-memory-write"
 import type { MemoryWiringOptions } from "./wiring-types"
 import type { MemoryIdentityContext } from "./context"
 import { createMemoryPromptHandler as createPromptHandler } from "./prompt"
+import { createProjectionPins, PROJECTION_PIN_ENTRY_TYPE } from "./projection-pin"
 
 export function registerMemoryStatic(input: {
   readonly pi: SenpiExtensionAPI
@@ -41,7 +43,7 @@ export function registerMemoryStatic(input: {
   readonly nudgeWiring: ReturnType<typeof createMemoryNudgeWiring>
   readonly noticeWiring: ReturnType<typeof createMemoryNoticeWiring>
   readonly recallWiring: ReturnType<typeof createMemoryRecallWiring>
-  readonly memorianGateWiring: MemorianGateWiring
+  readonly kibitzer: KibitzerComposition
   readonly dreamTriggerWiring: DreamTriggerWiring
   readonly completionApi: (pi: SenpiExtensionAPI) => ReflectionCompletionApi | undefined
   readonly resolveContext: (sessionId: string) => MemoryIdentityContext | undefined
@@ -63,28 +65,29 @@ export function registerMemoryStatic(input: {
   readonly onMemoryWrite?: (sessionId: string) => void | Promise<void>
 }): void {
   const {
-    pi, ctx, options, promptCache, nudgeWiring, noticeWiring, recallWiring, memorianGateWiring, dreamTriggerWiring,
+    pi, ctx, options, promptCache, nudgeWiring, noticeWiring, recallWiring, dreamTriggerWiring,
     completionApi, resolveContext, journalWiringFor, factsWiringFor, runtimeFor,
     triggerSessionFor, resolvePalacePeople, loadCommandSettings, lastEventCtx,
     activeSession, skillsUsageTrackersRef, memoryUsageTrackersRef, onReflectionLaunch, onSettled, onMemoryWrite,
   } = input
   const api = completionApi(pi)
-  // The gate is detached, so it receives the live appendEntry seam rather than the disposed event ctx.
-  // Registration is capability-gated below; this callback is only used when the host supports it.
   if (api !== undefined) {
     registerReflectionCompletionRenderer(api)
     registerReflectionHealthRenderer(api)
+    registerReflectionParkedRenderer(api)
   }
   if (hasMemoryCapabilities(pi)) {
     nudgeWiring.register(pi)
     noticeWiring.register(pi)
-    memorianGateWiring.attachEntrySink((customType, data) => pi.appendEntry(customType, data))
   }
-  const toolExposure = options.toolExposure ?? "direct"
+  const projectionPins = createProjectionPins()
+  const entryApi = hasMemoryCapabilities(pi) ? pi : undefined
   const promptHandler = createPromptHandler({
     resolveContext,
     cache: promptCache,
-    searchExposure: () => toolExposure === "search",
+    pins: projectionPins,
+    ...(entryApi === undefined ? {} : { recordPin: (record) => entryApi.appendEntry(PROJECTION_PIN_ENTRY_TYPE, record) }),
+    onRepin: (sessionId, reason) => options.logger?.info("omo-senpi memory projection repinned", { sessionId, reason }),
     resolveCompileWarnTokens: () => loadCommandSettings().settings.compile_warn_tokens,
     resolveNudgeTurns: (repo, sessionId, identity) => nudgeWiring.nudgeTurns(repo, sessionId, identity),
     resolveSoulNotice: async (repo, sessionId, identity) => {
@@ -97,13 +100,18 @@ export function registerMemoryStatic(input: {
     },
   })
   pi.on("before_agent_start", (payload, eventCtx) => {
-    lastEventCtx.current = eventCtx
+    if (!isPreview(payload)) lastEventCtx.current = eventCtx
     return promptHandler(payload, eventCtx)
-  })
+  }, { previewSafe: true })
   // Recall owns a SEPARATE before_agent_start handler registered AFTER the projection handler:
   // senpi merges one message per handler in registration order, so the hint lands last and the
   // prompt handler stays the only writer of systemPrompt.
   if (hasMemoryCapabilities(pi)) recallWiring.register(pi)
+  // Kibitzer hooks come LAST: their before_agent_start handler only captures the prompt for the
+  // resident sidecar and never contributes a message, so registering it after the projection
+  // handler keeps handler results ordered projection-first, the same invariant the recall
+  // registration above documents. Its agent_settled handler is bookkeeping, never a wake.
+  if (hasMemoryCapabilities(pi)) input.kibitzer.registerHooks(pi)
   pi.on("session_start", (_payload, eventCtx) => {
     if (eventCtx !== undefined) lastEventCtx.current = eventCtx
   })
@@ -120,14 +128,11 @@ export function registerMemoryStatic(input: {
     }
     const result = await journalWiringFor(identity).reconcileSession(eventCtx)
     await factsWiringFor(identity).onSettled(sessionId)
-    // Fire-and-forget by contract: the gate advises the NEXT turn, so this one never waits for it.
-    memorianGateWiring.onSettled(eventCtx)
     await onSettled?.(sessionId, eventCtx)
     return result
   })
   registerMemoryWriteListener(pi, options, onMemoryWrite)
   registerMemoryToolSurface(pi, () => (activeSession.current === undefined ? undefined : resolveContext(activeSession.current)), {
-    exposure: toolExposure,
     onCommit: (commit) => {
       const context = activeSession.current === undefined ? undefined : resolveContext(activeSession.current)
       if (context !== undefined) noticeWiring.onCommit(context, commit)
@@ -176,7 +181,10 @@ export function registerMemoryStatic(input: {
     contextForSession: (sessionId) => asCommandIdentity(resolveContext(sessionId)),
     resolveIdentity: () => (activeSession.current === undefined ? undefined : asCommandIdentity(resolveContext(activeSession.current))),
     loadSettings: loadCommandSettings,
-    bustPromptCache: () => promptCache.clear(),
+    bustPromptCache: () => {
+      promptCache.clear()
+      projectionPins.requestRefresh()
+    },
     reflectionSink: {
       request: async (request) => {
         if (activeSession.current === undefined) throw new Error("no bound memory session")
@@ -190,6 +198,7 @@ export function registerMemoryStatic(input: {
           ...(request.conversationIds === undefined ? {} : { conversationIds: request.conversationIds }),
         })
         if (result === null) throw new Error("reflection reservation rejected")
+        if (result.status === "parked") throw new Error("manual reflection must bypass the park gate")
         if (result.status === "active") {
           runtime.launch(result.run)
           await onReflectionLaunch?.(identity.identity, result.run)
@@ -212,11 +221,15 @@ export function registerMemoryStatic(input: {
     resolveSession: triggerSessionFor,
     onLaunch: () => {},
     // A compaction rewrites the transcript the pending nudges were judged against, so they die with it.
-    onCompactionAccepted: (conversationId) => memorianGateWiring.onCompactionAccepted(conversationId),
+    onCompactionAccepted: (conversationId) => input.kibitzer.onCompactionAccepted(conversationId, resolveContext(conversationId)),
     ...(options.logger === undefined ? {} : { logger: options.logger }),
   })
   triggerWiring.register(pi)
   dreamTriggerWiring.register(pi)
+}
+
+function isPreview(value: unknown): boolean {
+  return typeof value === "object" && value !== null && "preview" in value && value.preview === true
 }
 
 /** memory.write_notice.enabled for the bound identity, honouring its per-agent override. */

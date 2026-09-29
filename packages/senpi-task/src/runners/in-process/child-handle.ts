@@ -1,3 +1,5 @@
+import type { TaskStartFailureKind, TaskStartFailureReason } from "../../state/start-failure"
+
 export type ChildSessionEvent = {
   readonly type: string
   readonly message?: unknown
@@ -18,25 +20,50 @@ export type ChildSession = {
   dispose(): void
 }
 
+/**
+ * A closed, PARENT-AUTHORED classification of why a runner refused. Unlike `message`, no member is
+ * ever derived from child output, so it is the one part of a failure that is safe to surface and
+ * persist verbatim - and `manager.ts` still treats it only as a lookup key, never as text to echo.
+ */
+export type RunnerFailureReason = TaskStartFailureReason
+
 export type RunnerFailure = {
   // The snake_case kinds map 1:1 onto the manager's respawn disposition codes (todo 12): a resume
   // rebuild failure is TYPED and retryable, never a silently weakened tool set or transcript.
-  readonly kind:
-    | "child-prompt-failed"
-    | "child-turn-failed"
-    | "session-create-failed"
-    | "depth-exceeded"
-    | "model_unavailable"
-    | "tools_unavailable"
-    | "session_unavailable"
+  readonly kind: TaskStartFailureKind
   readonly message: string
+  readonly reason?: RunnerFailureReason
   readonly cause?: unknown
+  /**
+   * Structured exit facts for the internal event log, when the child actually reached a process exit.
+   *
+   * `message` is stderr-derived (`runners/rpc/exit-mapping.ts`) and therefore untrusted child output,
+   * so it must never reach a durable artifact - `manager.ts publicStartFailureMessage` collapses it for
+   * exactly that reason. These are closed enums and numbers, which cannot carry a credential, so they
+   * can be persisted and finally answer WHY a child died instead of only THAT it died.
+   *
+   * `rejected_while` is captured by the RPC runner before unstarted-handle cleanup: `alive` means
+   * the initial command rejected while the child was still live, while `exited` means the child had
+   * already produced the exit outcome. It is intentionally separate from `exit`, because cleanup
+   * terminates a still-live child and must never be mistaken for the rejection's cause.
+   *
+   * Shape is inlined rather than imported from `../types`: that module imports RunnerOutcome from this
+   * one, so importing back would close a cycle.
+   */
+  readonly rejected_while?: "alive" | "exited"
+  readonly exit?: {
+    readonly kind: "clean" | "killed" | "crashed" | "spawn_error"
+    readonly code: number | null
+    readonly signal: NodeJS.Signals | null
+  }
 }
 
 export type RunnerOutcome =
-  | { readonly status: "completed"; readonly finalResponse: string }
-  | { readonly status: "error"; readonly failure: RunnerFailure; readonly killed?: boolean }
+  | { readonly status: "completed"; readonly finalResponse: string; readonly model?: string }
+  | { readonly status: "error"; readonly failure: RunnerFailure; readonly killed?: boolean; readonly model?: string }
   | { readonly status: "cancelled" }
+
+export type ChildCompletionPolicy = "final-text" | "turn"
 
 export type ChildHandle = {
   readonly task_id: string
@@ -54,11 +81,13 @@ export type CreateChildHandleInput = {
   readonly taskId: string
   readonly session: ChildSession
   readonly promptText: string
+  readonly completion?: ChildCompletionPolicy
 }
 
 export type CreateRestoredChildHandleInput = {
   readonly taskId: string
   readonly session: ChildSession
+  readonly completion?: ChildCompletionPolicy
 }
 
 // Per-turn facts observed from the session's event stream. senpi surfaces provider/stream failures
@@ -69,6 +98,8 @@ type TurnObservation = {
   text: string | undefined
   stopReason: string | undefined
   errorMessage: string | undefined
+  provider: string | undefined
+  model: string | undefined
   baseline: string | undefined
 }
 
@@ -80,6 +111,8 @@ function observeTurnEvent(observation: TurnObservation, event: ChildSessionEvent
   if (text !== undefined) observation.text = text
   observation.stopReason = typeof message.stopReason === "string" ? message.stopReason : undefined
   observation.errorMessage = typeof message.errorMessage === "string" ? message.errorMessage : undefined
+  observation.provider = typeof message.provider === "string" ? message.provider : undefined
+  observation.model = typeof message.model === "string" ? message.model : undefined
 }
 
 function assistantText(message: Record<string, unknown>): string | undefined {
@@ -102,23 +135,29 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 // Derive the settled turn's outcome from what it emitted. The session-level getLastAssistantText()
 // is only trusted when it CHANGED during this turn (baseline diff): on a revive, the previous run's
 // text must never masquerade as a fresh completion.
-function turnOutcome(session: ChildSession, observation: TurnObservation): RunnerOutcome {
+function turnOutcome(session: ChildSession, observation: TurnObservation, completion: ChildCompletionPolicy): RunnerOutcome {
+  const provenance = observation.provider !== undefined && observation.model !== undefined
+    ? { model: `${observation.provider}/${observation.model}` }
+    : {}
   if (observation.stopReason === "error" || observation.stopReason === "aborted") {
     return {
       status: "error",
+      ...provenance,
       failure: {
         kind: "child-turn-failed",
         message: observation.errorMessage ?? `child turn ended with stopReason "${observation.stopReason}"`,
       },
     }
   }
-  if (observation.text !== undefined) return { status: "completed", finalResponse: observation.text }
+  if (observation.text !== undefined) return { status: "completed", finalResponse: observation.text, ...provenance }
   const final = session.getLastAssistantText()
   if (final !== undefined && final.length > 0 && final !== observation.baseline) {
-    return { status: "completed", finalResponse: final }
+    return { status: "completed", finalResponse: final, ...provenance }
   }
+  if (completion === "turn") return { status: "completed", finalResponse: "", ...provenance }
   return {
     status: "error",
+    ...provenance,
     failure: {
       kind: "child-turn-failed",
       message: observation.errorMessage ?? "child turn produced no assistant output",
@@ -134,6 +173,7 @@ async function runTurn(
   text: string,
   isAborted: () => boolean,
   observation: TurnObservation,
+  completion: ChildCompletionPolicy,
 ): Promise<RunnerOutcome> {
   try {
     await session.prompt(text)
@@ -152,15 +192,16 @@ async function runTurn(
     }
   }
   if (isAborted()) return { status: "cancelled" }
-  return turnOutcome(session, observation)
+  return turnOutcome(session, observation, completion)
 }
 
 // The outcome a restored handle owes waitForIdle() before any follow-up starts a turn: the
 // transcript's last assistant text is the honest drain for a child whose completion never reached
 // its record (crash between turn end and transition). No text means nothing durable was produced.
-function settledSessionOutcome(session: ChildSession): RunnerOutcome {
+function settledSessionOutcome(session: ChildSession, completion: ChildCompletionPolicy): RunnerOutcome {
   const final = session.getLastAssistantText()
   if (final !== undefined && final.length > 0) return { status: "completed", finalResponse: final }
+  if (completion === "turn") return { status: "completed", finalResponse: "" }
   return {
     status: "error",
     failure: { kind: "child-turn-failed", message: "restored session has no assistant output" },
@@ -172,13 +213,19 @@ type TrackedChildHandle = {
   beginTurn(text: string): void
 }
 
-function createTrackedChildHandle(taskId: string, session: ChildSession): TrackedChildHandle {
+function createTrackedChildHandle(
+  taskId: string,
+  session: ChildSession,
+  completion: ChildCompletionPolicy = "final-text",
+): TrackedChildHandle {
   let aborted = false
   let disposed = false
   let turnActive = false
   // Seeded for the restored case; createChildHandle's beginTurn replaces it immediately.
-  let running: Promise<RunnerOutcome> = Promise.resolve(settledSessionOutcome(session))
-  const observation: TurnObservation = { text: undefined, stopReason: undefined, errorMessage: undefined, baseline: undefined }
+  let running: Promise<RunnerOutcome> = Promise.resolve(settledSessionOutcome(session, completion))
+  const observation: TurnObservation = {
+    text: undefined, stopReason: undefined, errorMessage: undefined, baseline: undefined, provider: undefined, model: undefined,
+  }
   const unsubscribeObserver = session.subscribe((event) => observeTurnEvent(observation, event))
 
   // Start a fresh tracked turn and mark it active until it settles. waitForIdle() always returns the
@@ -189,8 +236,10 @@ function createTrackedChildHandle(taskId: string, session: ChildSession): Tracke
     observation.text = undefined
     observation.stopReason = undefined
     observation.errorMessage = undefined
+    observation.provider = undefined
+    observation.model = undefined
     observation.baseline = session.getLastAssistantText()
-    running = runTurn(session, text, () => aborted, observation)
+    running = runTurn(session, text, () => aborted, observation, completion)
     void running.then(
       () => {
         turnActive = false
@@ -232,7 +281,7 @@ function createTrackedChildHandle(taskId: string, session: ChildSession): Tracke
 }
 
 export function createChildHandle(input: CreateChildHandleInput): ChildHandle {
-  const tracked = createTrackedChildHandle(input.taskId, input.session)
+  const tracked = createTrackedChildHandle(input.taskId, input.session, input.completion)
   tracked.beginTurn(input.promptText)
   return tracked.handle
 }
@@ -241,5 +290,14 @@ export function createChildHandle(input: CreateChildHandleInput): ChildHandle {
 // replayed. The handle restores IDLE - its first followUp() starts a fresh tracked turn exactly
 // like a resident revival (any continuation nudge is manager-owned, todo 12, never the runner's).
 export function createRestoredChildHandle(input: CreateRestoredChildHandleInput): ChildHandle {
-  return createTrackedChildHandle(input.taskId, input.session).handle
+  return createTrackedChildHandle(input.taskId, input.session, input.completion).handle
+}
+
+// The pre-admission counterpart of rpc/start-cleanup.ts: when handle construction itself throws,
+// the session that createSession() already opened belongs to nobody - no handle exists, so neither
+// the manager nor the lifecycle destruction port can ever reach it. Discarding it here keeps that
+// teardown inside the handle-definition module that owns dispose delegation, so the single-writer
+// rule still holds: lifecycle remains the only INVOKER for admitted handles.
+export function discardUnstartedChildSession(session: ChildSession): void {
+  session.dispose()
 }

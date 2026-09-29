@@ -8,8 +8,14 @@ export const DOC_SECTIONS_DATA = /** @type {const} */ ([
     title: "Agent / Model Matching",
   },
   { id: "team-mode", file: "guide/team-mode.md", title: "Team Mode" },
+  { id: "computer-use", file: "guide/computer-use.md", title: "Computer Use" },
+  { id: "computer-tool", file: "reference/computer.md", title: "Computer Tool" },
   { id: "cli", file: "reference/cli.md", title: "CLI Reference" },
   { id: "configuration", file: "reference/configuration.md", title: "Configuration" },
   { id: "features", file: "reference/features.md", title: "Features" },
   { id: "manifesto", file: "manifesto.md", title: "Manifesto" },
+])
+
+export const DOC_PAGES_DATA = /** @type {const} */ ([
+  { file: "guide/install.md", route: "/docs/install" },
 ])

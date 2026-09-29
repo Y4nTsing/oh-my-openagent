@@ -3,9 +3,33 @@
 // 33586966744 hit ENOENT on packages/lsp-daemon/dist in every platform leg.
 
 import { describe, expect, test } from "bun:test"
-import { sep } from "node:path"
+import { readFileSync } from "node:fs"
+import { dirname, join, resolve, sep } from "node:path"
+import { fileURLToPath } from "node:url"
 
-import { ensurePrebuiltNativeInputs, type PrebuiltInputDependencies } from "./build-omo-native"
+import { PERSONA_ASSET_FILES } from "@oh-my-opencode/memory-core/personas"
+
+import {
+  ensurePrebuiltNativeInputs,
+  PAYLOAD_DIRECTORIES,
+  PAYLOAD_FILES,
+  PAYLOAD_SCRIPT,
+  REQUIRED_PLUGIN_ARTIFACTS,
+  type PrebuiltInputDependencies,
+} from "./build-omo-native"
+
+describe("runtime persona coverage", () => {
+  test("#given the runtime persona manifest #when the payload requirements are read #then every persona is required", () => {
+    // given
+    const required = new Set<string>(REQUIRED_PLUGIN_ARTIFACTS)
+
+    // when
+    const unguarded = PERSONA_ASSET_FILES.filter((filename) => !required.has(join("extensions", filename)))
+
+    // then
+    expect(unguarded).toEqual([])
+  })
+})
 
 function recordingDependencies(input: {
   readonly existing: readonly string[]
@@ -84,5 +108,44 @@ describe("ensurePrebuiltNativeInputs", () => {
 
     // when / then
     expect(() => ensurePrebuiltNativeInputs(dependencies)).toThrow("spawn bun ENOENT")
+  })
+})
+
+// Regression: skills-conditional was in the plugin `files` allowlist but not in the payload copy
+// lists, so every published omo-ai shipped without the staged x-search SKILL.md and senpi warned
+// "skill path does not exist" at startup.
+describe("plugin payload allowlist parity", () => {
+  const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..")
+  const pluginFiles: readonly string[] = JSON.parse(
+    readFileSync(join(repoRoot, "packages", "omo-senpi", "plugin", "package.json"), "utf8"),
+  ).files
+
+  test("#given the plugin files allowlist #when compared with the payload lists #then every published entry is copied", () => {
+    // given
+    const copied = new Set<string>([
+      ...PAYLOAD_DIRECTORIES,
+      ...PAYLOAD_FILES,
+      PAYLOAD_SCRIPT.split(sep).join("/"),
+    ])
+
+    // when
+    const uncopied = pluginFiles.filter((entry) => !copied.has(entry))
+
+    // then
+    expect(uncopied).toEqual([])
+  })
+
+  test("#given the daemon launch spec #when checking the payload #then it is both copied and required", () => {
+    // The spec is a root-level plugin file, so the directory copies never reach it; it has to be on
+    // the root-file list to be copied and on the required list so a payload without it fails the
+    // build instead of shipping an `omo daemon run` that exits 5.
+    expect(PAYLOAD_FILES).toContain("daemon-launch-spec.json")
+    expect(REQUIRED_PLUGIN_ARTIFACTS).toContain("daemon-launch-spec.json")
+  })
+
+  test("#given the conditional x-search skill #when checking the payload #then it is both copied and required", () => {
+    // when / then
+    expect(PAYLOAD_DIRECTORIES).toContain("skills-conditional")
+    expect(REQUIRED_PLUGIN_ARTIFACTS).toContain(join("skills-conditional", "x-search", "SKILL.md"))
   })
 })

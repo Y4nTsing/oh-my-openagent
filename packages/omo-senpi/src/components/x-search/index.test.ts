@@ -26,12 +26,15 @@ interface FakePi extends SenpiExtensionAPI {
   readonly handlers: Map<string, Array<(payload: unknown, ctx?: unknown) => unknown>>
 }
 
-function fakePi(): FakePi {
+/** `loadedSkills` stands for skills the host loaded before extensions contributed theirs. */
+function fakePi(loadedSkills: ReadonlyArray<{ readonly name: string; readonly path: string }> = []): FakePi {
   const tools: Array<Record<string, unknown>> = []
   const handlers = new Map<string, Array<(payload: unknown, ctx?: unknown) => unknown>>()
   return {
     tools,
     handlers,
+    getCommands: () =>
+      loadedSkills.map((skill) => ({ name: `skill:${skill.name}`, source: "skill", sourceInfo: { path: skill.path } })),
     on(event, handler) {
       handlers.set(event, [...(handlers.get(event) ?? []), handler])
     },
@@ -46,19 +49,28 @@ function fakePi(): FakePi {
   }
 }
 
-function recordingLogger(): ComponentLogger & { readonly messages: string[] } {
-  const messages: string[] = []
+type LoggerLevel = "debug" | "info" | "warn" | "error"
+
+interface RecordingLogger extends ComponentLogger {
+  readonly entries: Array<{ readonly level: LoggerLevel; readonly message: string }>
+  readonly messages: string[]
+}
+
+/** Records every level; `messages` holds only the levels the default console logger prints. */
+function recordingLogger(): RecordingLogger {
+  const entries: Array<{ level: LoggerLevel; message: string }> = []
+  const record = (level: LoggerLevel) => (message: string) => {
+    entries.push({ level, message })
+  }
   return {
-    messages,
-    info: (message) => {
-      messages.push(message)
+    entries,
+    get messages() {
+      return entries.filter((entry) => entry.level !== "debug").map((entry) => entry.message)
     },
-    warn: (message) => {
-      messages.push(message)
-    },
-    error: (message) => {
-      messages.push(message)
-    },
+    debug: record("debug"),
+    info: record("info"),
+    warn: record("warn"),
+    error: record("error"),
   }
 }
 
@@ -77,6 +89,62 @@ function fakeEctx(stored: unknown, apiKey: string | undefined = "stored-token") 
 
 afterEach(() => {
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
+})
+
+function homeWith(config: Record<string, unknown>): string {
+  const home = mkdtempSync(join(tmpdir(), "omo-x-search-home-"))
+  tempDirs.push(home)
+  mkdirSync(join(home, ".omo"), { recursive: true })
+  writeFileSync(join(home, ".omo", "omo.jsonc"), JSON.stringify(config), "utf8")
+  return home
+}
+
+function discoveredSkillPaths(pi: FakePi): unknown[] {
+  return (pi.handlers.get("resources_discover") ?? []).flatMap((handler) => {
+    const result = handler({ type: "resources_discover", cwd: tmpdir(), reason: "startup" }) as
+      | { skillPaths?: unknown[] }
+      | undefined
+    return result?.skillPaths ?? []
+  })
+}
+
+describe("createXSearchComponent skill contribution", () => {
+  const credential = { xai: { type: "oauth", refresh: "r" } }
+
+  it("#given the host already loaded a user skill named x-search #when resources_discover fires #then the conditional skill yields and the tool stays", () => {
+    const pi = fakePi([{ name: "x-search", path: "/home/me/.omo/agent/skills/x-search/SKILL.md" }])
+    createXSearchComponent({
+      agentDir: agentDirWith(credential),
+      env: { HOME: homeWith({}) },
+      resolveSkillPath: () => "/plugin/skills-conditional/x-search/SKILL.md",
+    }).register(pi, fakeCtx())
+
+    expect(discoveredSkillPaths(pi)).toEqual([])
+    expect(pi.tools.map((tool) => tool.name)).toEqual(["x_search"])
+  })
+
+  it("#given disabled_skills names x-search #when resources_discover fires #then the conditional skill is not contributed and the tool stays", () => {
+    const pi = fakePi()
+    createXSearchComponent({
+      agentDir: agentDirWith(credential),
+      env: { HOME: homeWith({ disabled_skills: ["x-search"] }) },
+      resolveSkillPath: () => "/plugin/skills-conditional/x-search/SKILL.md",
+    }).register(pi, fakeCtx())
+
+    expect(discoveredSkillPaths(pi)).toEqual([])
+    expect(pi.tools.map((tool) => tool.name)).toEqual(["x_search"])
+  })
+
+  it("#given no same-name skill and an empty denylist #when resources_discover fires #then the conditional skill is contributed", () => {
+    const pi = fakePi([{ name: "frontend", path: "/home/me/.omo/agent/skills/frontend/SKILL.md" }])
+    createXSearchComponent({
+      agentDir: agentDirWith(credential),
+      env: { HOME: homeWith({}) },
+      resolveSkillPath: () => "/plugin/skills-conditional/x-search/SKILL.md",
+    }).register(pi, fakeCtx())
+
+    expect(discoveredSkillPaths(pi)).toEqual(["/plugin/skills-conditional/x-search/SKILL.md"])
+  })
 })
 
 describe("createXSearchComponent registration gate", () => {
@@ -100,6 +168,18 @@ describe("createXSearchComponent registration gate", () => {
     expect(result.skillPaths[0].endsWith(join("x-search", "skill", "SKILL.md"))).toBe(true)
   })
 
+  it("#given a connected credential #when registering #then startup stays quiet and the outcome lands on the debug channel only", () => {
+    const pi = fakePi()
+    const logger = recordingLogger()
+    const component = createXSearchComponent({ agentDir: agentDirWith({ xai: { type: "oauth" } }), env: {} })
+
+    component.register(pi, fakeCtx(logger))
+
+    expect(pi.tools).toHaveLength(1)
+    expect(logger.messages).toEqual([])
+    expect(logger.entries).toEqual([{ level: "debug", message: "x-search registered" }])
+  })
+
   it("#given a packaged plugin layout #when resolving the skill path #then the conditional skills-conditional copy wins", () => {
     const pluginRoot = mkdtempSync(join(tmpdir(), "omo-x-search-plugin-"))
     tempDirs.push(pluginRoot)
@@ -109,11 +189,37 @@ describe("createXSearchComponent registration gate", () => {
 
     const resolved = resolveXSearchSkillPath(bundleUrl)
 
-    expect(resolved.endsWith(join("x-search", "SKILL.md"))).toBe(true)
     expect(resolved).toBe(join(pluginRoot, "skills-conditional", "x-search", "SKILL.md"))
   })
 
-  it("#given no xai entry and no XAI_API_KEY #when registering #then nothing is registered", () => {
+  it("#given a packaged plugin layout without skills-conditional #when resolving the skill path #then no path is advertised", () => {
+    const pluginRoot = mkdtempSync(join(tmpdir(), "omo-x-search-plugin-bare-"))
+    tempDirs.push(pluginRoot)
+    mkdirSync(join(pluginRoot, "extensions"), { recursive: true })
+    const bundleUrl = pathToFileURL(join(pluginRoot, "extensions", "omo.js")).href
+
+    const resolved = resolveXSearchSkillPath(bundleUrl)
+
+    expect(resolved).toBeUndefined()
+  })
+
+  it("#given a connected credential but no resolvable skill #when registering #then the tool registers, no skill path is contributed, and one warning names the gap", () => {
+    const pi = fakePi()
+    const logger = recordingLogger()
+    const component = createXSearchComponent({
+      agentDir: agentDirWith({ xai: { type: "oauth" } }),
+      env: {},
+      resolveSkillPath: () => undefined,
+    })
+
+    component.register(pi, fakeCtx(logger))
+
+    expect(pi.tools).toHaveLength(1)
+    expect(pi.handlers.has("resources_discover")).toBe(false)
+    expect(logger.messages).toEqual(["x-search skill missing: x_search registered without its conditional skill"])
+  })
+
+  it("#given no xai entry and no XAI_API_KEY #when registering #then nothing is registered and startup stays quiet", () => {
     const pi = fakePi()
     const logger = recordingLogger()
     const component = createXSearchComponent({ agentDir: agentDirWith({ anthropic: { type: "oauth" } }), env: {} })
@@ -122,7 +228,8 @@ describe("createXSearchComponent registration gate", () => {
 
     expect(pi.tools).toHaveLength(0)
     expect(pi.handlers.has("resources_discover")).toBe(false)
-    expect(logger.messages.some((message) => message.includes("no xAI credential"))).toBe(true)
+    expect(logger.messages).toEqual([])
+    expect(logger.entries).toEqual([{ level: "debug", message: "x-search skipped: no xAI credential" }])
   })
 
   it("#given no stored entry but XAI_API_KEY #when registering #then the tool registers", () => {

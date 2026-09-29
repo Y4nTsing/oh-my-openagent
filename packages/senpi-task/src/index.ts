@@ -1,4 +1,29 @@
 // allow: SIZE_OK - package-root public API barrel contains re-exports only and intentionally preserves one stable root import surface.
+export { createWorkpoolTool, createWorkpoolWorkerTool, buildWorkpoolExecute } from "./tools/workpool"
+export { WorkpoolParams, WorkpoolYieldParams } from "./tools/workpool-schema"
+export { WorkpoolCommandSchema, WorkpoolCreateSchema } from "./workpool/schema"
+export { createWorkpoolStore } from "./workpool/store"
+export { WorkpoolError, WORKPOOL_ERROR_CODES } from "./workpool/types"
+export type { WorkpoolEngine } from "./workpool/engine"
+export { createKernelToolBindings, type KernelToolBindingRegistry } from "./kernel-tools/bindings"
+export { childInvokeScope, escalatingHostTools, isWriteCapableHostTool } from "./kernel-tools/nested-host-scope"
+export {
+  KERNEL_TOOL_ERROR_CODES,
+  KernelToolError,
+  createKernelToolWrappers,
+  isReservedKernelToolName,
+  kernelToolKey,
+  normalizeKernelToolName,
+  readKernelToolsCapability,
+  resolveKernelToolGrant,
+  supportsInvokeScope,
+  type KernelToolDescriptor,
+  type KernelToolErrorCode,
+  type KernelToolGrant,
+  type KernelToolInvokeScope,
+  type KernelToolsCapability,
+} from "./kernel-tools"
+export type { PoolId, ItemId, WorkpoolRecord, WorkpoolCaller, WorkpoolCreate, WorkpoolEvent, WorkpoolErrorCode } from "./workpool/types"
 export {
   BACKGROUND_MODES,
   COST_REPORT_STATUSES,
@@ -13,8 +38,14 @@ export {
   messageability,
   transitionTaskRecord,
 } from "./state"
+export { createIsolationRuntime, isolationBackends } from "./isolation"
+export type { IsolationRuntime, OwnerProbe } from "./isolation"
 export type {
   BackgroundMode,
+  IsolationBackendKind,
+  IsolationMergeResult,
+  IsolationRecord,
+  TaskIsolationSpec,
   CostReportStatus,
   DurationSourceStatus,
   LegacyProcessSpawnSpec,
@@ -44,6 +75,7 @@ export type {
   TaskRecordStore,
 } from "./store"
 export {
+  buildLiveStatsTokens,
   composeStatusLine,
   formatLiveSpend,
   formatRunSpend,
@@ -53,12 +85,13 @@ export {
   taskIdentityLabel,
   toolCountSuffix,
 } from "./status-line"
-export type { StatusLineInput, StatusLineStats, StatusTargetInput, TaskIdentityInput } from "./status-line"
+export type { LiveStatsTokens, StatusLineInput, StatusLineStats, StatusTargetInput, TaskIdentityInput } from "./status-line"
 export { TASK_SUMMARY_MAX_LENGTH, clampTaskSummary } from "./task-summary"
 export {
   assistantLastLine,
   createChildProgress,
   formatToolActivity,
+  selectLiveActivityVerb,
   type ToolProgressDetails,
 } from "./progress"
 export { createMinimalSenpiResourceLoader } from "./senpi/minimal-resource-loader"
@@ -93,6 +126,7 @@ export {
   CATEGORY_DESCRIPTIONS,
   CATEGORY_PROMPT_APPENDS,
   DEFAULT_CATEGORIES,
+  builtinCategoryChainCandidates,
   resolveAvailableCategoryNames,
   resolveCategory,
 } from "./category"
@@ -109,12 +143,16 @@ export {
   InProcessRunner,
   RunnerError,
   buildSubagentPrompt,
+  childStructuralToolNames,
+  childVisibleToolNames,
   createChildResourceLoader,
   filterSharedParentTools,
   isTaskOrTeamFamilyTool,
   mergeChildCustomTools,
+  SENPI_SESSION_BUILTIN_NAMES,
 } from "./runners"
 export type {
+  ChildCompletionPolicy,
   ChildHandle,
   ChildSession,
   ChildSessionEvent,
@@ -127,11 +165,44 @@ export type {
   RunnerOutcome,
   SharedToolFilterOptions,
   SubagentPromptInput,
+  TaskHostWarmth,
+  WarmHostSessionInput,
 } from "./runners"
 export {
+  attachOwnEndpoint,
+  createHostEndpointPort,
+  probeWithEngine,
+  parseShardBasename,
+  resolveShardSocket,
+  SHARD_KEY_CONTEXT,
+  shardKey,
+  shardSocketPath,
+  shardSocketPathForKey,
+  ensureTaskDaemon,
+  HOST_NOTICE_TOKENS,
+  HostUnavailableError,
+  isHostSessionHandle,
+  isOwnEndpoint,
+  readOwnHostSocket,
+  readTaskStoreIndex,
+  registerStoreIndex,
+  StoreIndexUnavailableError,
+  taskStoreIndexPath,
+  readMemberSessionIdentity,
+  readSessionAncestry,
+  readSessionContext,
+  readSessionRole,
+  HOST_WARMUP_CONTEXT,
+  HOST_WARMUP_TASK_ID,
+  isHostWarmupSession,
+  HostWarmRefusedError,
+  warmTaskHost,
+  resolveTaskHostSocket,
   RpcCommandError,
+  RpcHostRunner,
   RpcProcessRunner,
   RpcProtocolClient,
+  createLiveHostChildren,
   buildAutoUiResponse,
   buildChildArgs,
   buildRpcSpawn,
@@ -139,6 +210,7 @@ export {
   classifyChildExit,
   createRpcChildHandle,
   detectBunBinary,
+  detectCompiledEngine,
   mapExitOutcomeToError,
   parseExtensionEntries,
   resolveChildSessionDir,
@@ -147,24 +219,52 @@ export {
   tailStderr,
   terminateRpcChild,
 } from "./runners"
+export { resolveInheritedExtensionList, selectPackageExtensionPaths } from "./runners/rpc/parent-extensions"
+export type { InheritedExtensions } from "./runners/rpc/parent-extensions"
 export type {
   ChildEventListener,
   ChildExitFacts,
   ChildExitInput,
   ChildExitOutcome,
+  CreateHostSessionChannel,
   CreateRpcChildHandleOptions,
+  EnsuredTaskDaemon,
+  EnsureTaskDaemonInput,
+  EnsureTaskDaemonPort,
+  FallbackChildRunner,
+  HostUnavailableReason,
+  HostEndpointPortInput,
+  HostNoticeSink,
+  HostNoticeToken,
+  HostShardEvents,
+  LiveHostChildren,
+  ReattachOutcome,
+  ReattachOutcomeInfo,
+  TransportLostInfo,
+  HostProtocolProbe,
+  ShardIdentity,
+  ShardResolution,
+  HostSessionChannel,
+  HostSessionChildHandle,
+  HostSessionFacts,
   MalformedLineHandler,
+  MemberSessionIdentity,
   RpcChildHandle,
+  RpcHostRunnerOptions,
   RpcProcessRunnerOptions,
   RpcProtocolClientOptions,
   RpcRunnerSpec,
   RpcSpawnDescriptor,
   RpcSpawnRuntime,
   SenpiLauncher,
+  SessionAncestry,
+  SessionRole,
+  ShardResolver,
   RunnerErrorFacts,
   TerminateOptions,
 } from "./runners"
 export {
+  HOST_TURN_RESUMED_EVENT,
   NameRegistry,
   TaskConcurrency,
   adaptInProcessHandle,
@@ -173,8 +273,10 @@ export {
   createParentRegistrySessionContext,
   createRpcManagedRunner,
   createTaskManager,
+  createExecutionModeGate,
   decideDepthPolicy,
   findModelReference,
+  resolveAutoExecutionMode,
   resolveExecutionMode,
 } from "./manager"
 export type {
@@ -185,7 +287,9 @@ export type {
   ContinueResult,
   DepthDecision,
   DepthPolicyInput,
+  ConfiguredExecutionMode,
   ExecutionMode,
+  ExecutionModeGate,
   ExecutionModeSources,
   InProcessRunnerLike,
   InProcessSessionContext,
@@ -276,6 +380,7 @@ export type {
   ParentNotifier,
   ParentNotifierMessage,
   ParentState,
+  RecordDeliveryFailureInput,
   RoutingDecision,
   SkipReason,
   TransitionReason,
@@ -285,14 +390,17 @@ export {
   createTaskLifecycle,
   getLifecycleDetachedRevivalRollback,
   getLifecycleReattachPorts,
+  NO_HOST_ENDPOINT,
   registerLifecycleDetachedRevivalRollback,
   registerLifecycleReattachPorts,
+  selectRevivalBatch,
 } from "./lifecycle"
 export type {
   AdmissionResult,
   CleanupResult,
   DestroyCause,
   DetachedRevivalRollbackResult,
+  HostEndpointPort,
   LifecycleDeps,
   LifecycleReattachPorts,
   ProcessSignaller,
@@ -306,6 +414,7 @@ export type {
   ResidencyRegistry,
   RespawnPort,
   RespawnResult,
+  RevivalSelection,
   SuspendFailure,
   SuspendInput,
   SuspendSummary,
@@ -360,6 +469,7 @@ export type {
   TaskAgentInfo,
   TaskAncestry,
   TaskCategoryInfo,
+  TaskHandleDetails,
   TaskTargetError,
   TaskTargetErrorCode,
   TaskTargetSelection,

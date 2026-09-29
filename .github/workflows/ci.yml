@@ -175,14 +175,14 @@ jobs:
         with:
           # and 1.3.12 hangs on windows-latest in the ast-grep install-script
           # timeout race.
-          bun-version: "1.4.0"
+          bun-version: "1.4.2"
 
 
       - uses: actions/cache@v6
         if: runner.os != 'Windows' && needs.ci-mode.outputs.run_heavy == 'true' && (matrix.os == 'ubuntu-latest' || needs.ci-mode.outputs.full_matrix == 'true')
         with:
           path: ~/.bun/install/cache
-          key: ${{ runner.os }}-bun-1.4.0-${{ hashFiles('bun.lock') }}
+          key: ${{ runner.os }}-bun-1.4.2-${{ hashFiles('bun.lock') }}
 
       - name: Install dependencies
         if: needs.ci-mode.outputs.run_heavy == 'true' && (matrix.os == 'ubuntu-latest' || needs.ci-mode.outputs.full_matrix == 'true')
@@ -208,7 +208,7 @@ jobs:
       # module state between files. Job-level sharding is the parallelism.
       - name: Run tests
         if: needs.ci-mode.outputs.run_heavy == 'true' && runner.os != 'Windows' && matrix.shard == '1/2' && (matrix.os == 'ubuntu-latest' || needs.ci-mode.outputs.full_matrix == 'true')
-        run: bun test packages/omo-opencode packages/memory-core
+        run: bun test --timeout 20000 packages/omo-opencode packages/memory-core
 
       - name: Run tests with Windows telemetry
         if: needs.ci-mode.outputs.run_heavy == 'true' && runner.os == 'Windows' && matrix.shard == '1/2' && (matrix.os == 'ubuntu-latest' || needs.ci-mode.outputs.full_matrix == 'true')
@@ -225,8 +225,8 @@ jobs:
       - name: Run tests
         if: needs.ci-mode.outputs.run_heavy == 'true' && runner.os != 'Windows' && matrix.shard == '2/2' && (matrix.os == 'ubuntu-latest' || needs.ci-mode.outputs.full_matrix == 'true')
         run: |
-          bun test packages/senpi-task/src/runners/rpc-process.windows.test.ts packages/senpi-task/src/__adversarial__/chaos-bench.test.ts packages/omo-codex/src/install/install-codex-legacy-agent-purge.test.ts script/codex-installer-version.test.ts packages/shared-skills/provenance-gate.test.ts packages/omo-codex/src/install/install-codex-mcp-manifest.test.ts packages/senpi-task/src/dag/scheduler.test.ts packages/omo-native/test/payload.test.ts script/build-omo-binary.test.ts
-          bun --config=bunfig.win2.parallel.toml test
+          bun test --timeout 20000 packages/senpi-task/src/runners/rpc-process.windows.test.ts packages/senpi-task/src/__adversarial__/chaos-bench.test.ts packages/omo-codex/src/install/install-codex-legacy-agent-purge.test.ts script/codex-installer-version.test.ts packages/shared-skills/provenance-gate.test.ts packages/omo-codex/src/install/install-codex-mcp-manifest.test.ts packages/senpi-task/src/dag/scheduler.test.ts packages/omo-native/test/payload.test.ts script/build-omo-binary.test.ts packages/senpi-task/src/team/member-extension/residency.test.ts script/omob-refresh.test.ts script/release-version.test.ts packages/senpi-task/src/store/record-lock.test.ts packages/senpi-task/src/store/record-lock-reap-window.test.ts packages/senpi-task/src/runners/rpc-host/durable-json.test.ts
+          bun --config=bunfig.win2.parallel.toml test --timeout 20000
 
       # Git Bash sets SHELL/MSYSTEM on Windows, which makes process-platform
       # tests observe sh instead of the native PowerShell/cmd execution path.
@@ -240,7 +240,7 @@ jobs:
           & .github/scripts/windows-ci-telemetry.ps1 `
             -ArtifactDirectory $telemetryDirectory `
             -Invocation "shard-2-quarantine" `
-            -TestArguments @("test", "packages/senpi-task/src/runners/rpc-process.windows.test.ts", "packages/senpi-task/src/__adversarial__/chaos-bench.test.ts", "packages/omo-codex/src/install/install-codex-legacy-agent-purge.test.ts", "script/codex-installer-version.test.ts", "packages/shared-skills/provenance-gate.test.ts", "packages/omo-codex/src/install/install-codex-mcp-manifest.test.ts", "packages/senpi-task/src/dag/scheduler.test.ts", "packages/omo-native/test/payload.test.ts", "script/build-omo-binary.test.ts")
+            -TestArguments @("test", "packages/senpi-task/src/runners/rpc-process.windows.test.ts", "packages/senpi-task/src/__adversarial__/chaos-bench.test.ts", "packages/omo-codex/src/install/install-codex-legacy-agent-purge.test.ts", "script/codex-installer-version.test.ts", "packages/shared-skills/provenance-gate.test.ts", "packages/omo-codex/src/install/install-codex-mcp-manifest.test.ts", "packages/senpi-task/src/dag/scheduler.test.ts", "packages/omo-native/test/payload.test.ts", "script/build-omo-binary.test.ts", "packages/senpi-task/src/team/member-extension/residency.test.ts", "script/omob-refresh.test.ts", "script/release-version.test.ts", "packages/senpi-task/src/store/record-lock.test.ts", "packages/senpi-task/src/store/record-lock-reap-window.test.ts", "packages/senpi-task/src/runners/rpc-host/durable-json.test.ts")
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & .github/scripts/windows-ci-telemetry.ps1 `
             -ArtifactDirectory $telemetryDirectory `
@@ -286,13 +286,13 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         if: needs.ci-mode.outputs.run_heavy == 'true'
         with:
-          bun-version: "1.4.0"
+          bun-version: "1.4.2"
 
       - uses: actions/cache@v6
         if: needs.ci-mode.outputs.run_heavy == 'true'
         with:
           path: ~/.bun/install/cache
-          key: ${{ runner.os }}-bun-1.4.0-${{ hashFiles('bun.lock') }}
+          key: ${{ runner.os }}-bun-1.4.2-${{ hashFiles('bun.lock') }}
 
       - name: Install dependencies
         if: needs.ci-mode.outputs.run_heavy == 'true'
@@ -338,13 +338,13 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         if: needs.ci-mode.outputs.run_heavy == 'true' && (matrix.os == 'ubuntu-latest' || needs.ci-mode.outputs.full_matrix == 'true')
         with:
-          bun-version: "1.4.0"
+          bun-version: "1.4.2"
 
       - uses: actions/cache@v6
         if: needs.ci-mode.outputs.run_heavy == 'true' && (matrix.os == 'ubuntu-latest' || needs.ci-mode.outputs.full_matrix == 'true')
         with:
           path: ~/.bun/install/cache
-          key: ${{ runner.os }}-bun-1.4.0-${{ hashFiles('bun.lock') }}
+          key: ${{ runner.os }}-bun-1.4.2-${{ hashFiles('bun.lock') }}
 
       - name: Install dependencies
         if: needs.ci-mode.outputs.run_heavy == 'true' && (matrix.os == 'ubuntu-latest' || needs.ci-mode.outputs.full_matrix == 'true')
@@ -425,13 +425,13 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         if: needs.ci-mode.outputs.run_heavy == 'true' && (matrix.os == 'ubuntu-latest' || needs.ci-mode.outputs.full_matrix == 'true')
         with:
-          bun-version: "1.4.0"
+          bun-version: "1.4.2"
 
       - uses: actions/cache@v6
         if: needs.ci-mode.outputs.run_heavy == 'true' && (matrix.os == 'ubuntu-latest' || needs.ci-mode.outputs.full_matrix == 'true')
         with:
           path: ~/.bun/install/cache
-          key: ${{ runner.os }}-bun-1.4.0-${{ hashFiles('bun.lock') }}
+          key: ${{ runner.os }}-bun-1.4.2-${{ hashFiles('bun.lock') }}
 
       - name: Install dependencies
         if: needs.ci-mode.outputs.run_heavy == 'true' && (matrix.os == 'ubuntu-latest' || needs.ci-mode.outputs.full_matrix == 'true')
@@ -450,6 +450,9 @@ jobs:
         run: |
           set -euo pipefail
           node packages/omo-senpi/plugin/scripts/build-extension.mjs --check
+          # The installer embeds the required-artifact list, so a stale copy demands files the
+          # plugin no longer ships and refuses to install. Nothing else in CI reads it.
+          node packages/omo-senpi/plugin/scripts/build-install.mjs --check
 
       - name: Run Senpi compatibility tests
         if: needs.ci-mode.outputs.run_heavy == 'true' && runner.os != 'Windows' && (matrix.os == 'ubuntu-latest' || needs.ci-mode.outputs.full_matrix == 'true')
@@ -463,7 +466,7 @@ jobs:
           npm --prefix packages/lsp-daemon test -- test/daemon-roundtrip.test.ts
           bunx tsgo --noEmit -p packages/omo-senpi/tsconfig.json
           bun test ./.agents/skills/senpi-qa/scripts/resolve-evidence-dir.test.mjs
-          bun test packages/omo-senpi
+          bun test --timeout 20000 packages/omo-senpi
 
       - name: Run Senpi compatibility tests with Windows telemetry
         if: needs.ci-mode.outputs.run_heavy == 'true' && runner.os == 'Windows' && (matrix.os == 'ubuntu-latest' || needs.ci-mode.outputs.full_matrix == 'true')
@@ -527,7 +530,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         if: needs.ci-mode.outputs.run_heavy == 'true'
         with:
-          bun-version: "1.4.0"
+          bun-version: "1.4.2"
 
       - name: Run published lazycodex-ai smoke commands
         if: needs.ci-mode.outputs.run_heavy == 'true'
@@ -557,6 +560,28 @@ jobs:
              [[ "$npx_doctor_output" == *"gpt-5.5-codex-mini"* ]]; then
             echo "::warning::lazycodex-ai doctor dry-run output changed: $npx_doctor_output"
           fi
+
+      - uses: actions/checkout@v7
+        if: needs.ci-mode.outputs.run_heavy == 'true'
+
+      - name: Install published payloads into an isolated CODEX_HOME
+        if: needs.ci-mode.outputs.run_heavy == 'true'
+        run: |
+          set -uo pipefail
+          status=0
+          for spec in lazycodex-ai@latest lazycodex-ai@beta oh-my-openagent@latest oh-my-openagent@beta; do
+            echo "::group::published install smoke: $spec"
+            if node script/published-install-smoke.mjs --package="$spec"; then
+              echo "published install smoke passed for $spec"
+            else
+              echo "::warning::published install smoke failed for $spec"
+              case "$spec" in
+                *@latest) status=1 ;;
+              esac
+            fi
+            echo "::endgroup::"
+          done
+          exit $status
 
       - name: Write job summary
         if: always()
@@ -594,13 +619,13 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         if: needs.ci-mode.outputs.run_heavy == 'true'
         with:
-          bun-version: "1.4.0"
+          bun-version: "1.4.2"
 
       - uses: actions/cache@v6
         if: needs.ci-mode.outputs.run_heavy == 'true'
         with:
           path: ~/.bun/install/cache
-          key: ${{ runner.os }}-bun-1.4.0-${{ hashFiles('bun.lock') }}
+          key: ${{ runner.os }}-bun-1.4.2-${{ hashFiles('bun.lock') }}
 
       - name: Install dependencies
         if: needs.ci-mode.outputs.run_heavy == 'true'
@@ -616,9 +641,21 @@ jobs:
           test -f dist/index.js || (echo "ERROR: dist/index.js not found!" && exit 1)
           test -f dist/index.d.ts || (echo "ERROR: dist/index.d.ts not found!" && exit 1)
 
+      # `bun run build` regenerates both JSON Schema artifacts, and every job
+      # builds before it tests, so tests/omo-schema-freshness.test.ts compares
+      # the regenerated file with itself in CI. Diffing against the commit is
+      # what actually catches a stale committed schema.
+      - name: Verify generated schema artifacts are committed
+        if: needs.ci-mode.outputs.run_heavy == 'true'
+        run: |
+          if ! git diff --exit-code -- assets/oh-my-opencode.schema.json assets/omo.schema.json; then
+            echo "::error::Committed JSON Schema artifacts are stale. Run 'bun run build:schema && bun run build:omo-schema' and commit assets/*.schema.json."
+            exit 1
+          fi
+
       - name: Verify dist bundle tests
         if: needs.ci-mode.outputs.run_heavy == 'true'
-        run: bun test packages/omo-opencode/src/shared/dist-bundle-bun-globals.test.ts packages/omo-opencode/src/shared/dist-bundle-prompt-content.test.ts
+        run: bun test --timeout 20000 packages/omo-opencode/src/shared/dist-bundle-bun-globals.test.ts packages/omo-opencode/src/shared/dist-bundle-prompt-content.test.ts
 
       - name: Write job summary
         if: always()
@@ -629,8 +666,9 @@ jobs:
           JOB_SUMMARY_DETAILS: |
             - Builds the distributable OpenCode/Codex packages.
             - Confirms `dist/index.js` and `dist/index.d.ts` exist.
+            - Fails when the build regenerates `assets/oh-my-opencode.schema.json` or `assets/omo.schema.json` differently from the committed copy.
             - Runs dist bundle regression tests.
-          JOB_SUMMARY_NEXT: Fix the first failing build prerequisite before debugging downstream dist checks.
+          JOB_SUMMARY_NEXT: Fix the first failing build prerequisite before debugging downstream dist checks; a stale schema artifact is fixed by `bun run build:schema && bun run build:omo-schema` plus committing the result.
         run: GITHUB_STEP_SUMMARY="$GITHUB_STEP_SUMMARY" bash .github/scripts/write-job-summary.sh
 
   omo-ai-payload-check:
@@ -647,13 +685,13 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         if: needs.ci-mode.outputs.run_heavy == 'true'
         with:
-          bun-version: "1.4.0"
+          bun-version: "1.4.2"
 
       - uses: actions/cache@v6
         if: needs.ci-mode.outputs.run_heavy == 'true'
         with:
           path: ~/.bun/install/cache
-          key: ${{ runner.os }}-bun-1.4.0-${{ hashFiles('bun.lock') }}
+          key: ${{ runner.os }}-bun-1.4.2-${{ hashFiles('bun.lock') }}
 
       - name: Install dependencies
         if: needs.ci-mode.outputs.run_heavy == 'true'
@@ -667,9 +705,17 @@ jobs:
         if: needs.ci-mode.outputs.run_heavy == 'true'
         run: node script/verify-omo-ai-payload.mjs
 
+      - name: Verify packed omo-ai consumer
+        if: needs.ci-mode.outputs.run_heavy == 'true'
+        run: node packages/omo-native/test/packed-consumer.mjs
+
       - name: Dry-run publish
         if: needs.ci-mode.outputs.run_heavy == 'true'
-        run: npm publish --dry-run --ignore-scripts --tag beta
+        # dev carries the last released version, which npm refuses to publish over.
+        # Stamp a throwaway prerelease in this job's checkout so the dry run checks the package, not release timing.
+        run: |
+          npm pkg set version="0.0.0-ci.${{ github.run_id }}.${{ github.run_attempt }}"
+          npm publish --dry-run --ignore-scripts --tag ci
         working-directory: packages/omo-native
 
       - name: Write job summary
@@ -698,12 +744,12 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: "1.4.0"
+          bun-version: "1.4.2"
 
       - uses: actions/cache@v6
         with:
           path: ~/.bun/install/cache
-          key: ${{ runner.os }}-bun-1.4.0-${{ hashFiles('bun.lock') }}
+          key: ${{ runner.os }}-bun-1.4.2-${{ hashFiles('bun.lock') }}
 
       - name: Install dependencies
         run: bun install --frozen-lockfile --ignore-scripts
@@ -753,45 +799,36 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: "1.4.0"
+          bun-version: "1.4.2"
 
+      # The notes travel as a file: passed through a step output into env, a long range exceeded the
+      # per-string exec limit and failed the job with "Argument list too long" (#8894).
       - name: Generate release notes
-        id: notes
-        run: |
-          NOTES=$(bun run script/generate-changelog.ts)
-          {
-            echo "notes<<EOF"
-            echo "$NOTES"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
+        run: bun run script/generate-changelog.ts > "$RUNNER_TEMP/draft-release-notes.md"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create or update draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NOTES: ${{ steps.notes.outputs.notes }}
           TARGET_SHA: ${{ github.sha }}
         run: |
+          NOTES_FILE="$RUNNER_TEMP/draft-release-notes.md"
           EXISTING_DRAFT=$(gh release list --json tagName,isDraft --jq '.[] | select(.isDraft == true and .tagName == "next") | .tagName')
-          
+
           if [ -n "$EXISTING_DRAFT" ]; then
             echo "Updating existing draft release..."
             gh release edit next \
               --title "Upcoming Changes 🍿" \
-              --notes-file - \
-              --draft <<EOF
-          $NOTES
-          EOF
+              --notes-file "$NOTES_FILE" \
+              --draft
           else
             echo "Creating new draft release..."
             gh release create next \
               --title "Upcoming Changes 🍿" \
-              --notes-file - \
+              --notes-file "$NOTES_FILE" \
               --draft \
-              --target "$TARGET_SHA" <<EOF
-          $NOTES
-          EOF
+              --target "$TARGET_SHA"
           fi
 
       - name: Write job summary

@@ -73,14 +73,19 @@ export interface HookInput {
 export interface CheckResult {
 	readonly hasComments: boolean;
 	readonly message: string;
+	readonly failure?: CheckFailure;
+}
+
+export interface CheckFailure {
+	readonly exitCode: number | null;
+	readonly stderr: string;
 }
 
 export type SpawnSignal = "SIGTERM" | "SIGKILL";
 
 export type SpawnProcess = {
 	readonly stdin: {
-		write(input: string): void;
-		end(): void;
+		send(input: string): Promise<void>;
 	};
 	readonly stdout: ReadableStream<Uint8Array>;
 	readonly stderr: ReadableStream<Uint8Array>;
@@ -124,5 +129,38 @@ export function makeAccumulator(
 export function getString(input: Record<string, unknown>, keys: readonly string[]): string | undefined;
 export function joinPatchLines(lines: readonly string[]): string;
 export function isRecord(value: unknown): value is Record<string, unknown>;
+export const COMMENT_CHECKER_RELEASE_VERSION: string;
+export const COMMENT_CHECKER_RELEASE_REPO: string;
+export type CommentCheckerArchiveExtension = "tar.gz" | "zip";
+export interface CommentCheckerReleaseAsset {
+	readonly os: string;
+	readonly arch: string;
+	readonly ext: CommentCheckerArchiveExtension;
+	readonly assetName: string;
+	readonly url: string;
+}
+export interface CommentCheckerCacheDirInput {
+	readonly platform: string;
+	readonly env: Readonly<Record<string, string | undefined>>;
+	readonly homedir: string;
+	readonly cacheDirName: string;
+}
+export function resolveCommentCheckerReleaseAsset(
+	platform: string,
+	arch: string,
+	version?: string,
+): CommentCheckerReleaseAsset | null;
+export function commentCheckerBinaryName(platform: string): string;
+export function commentCheckerCacheDir(input: CommentCheckerCacheDirInput): string;
+export const COMMENT_CHECKER_VERSION_MARKER: string;
+export function isCachedCommentCheckerCurrent(cacheDir: string, readFile?: (path: string) => string): boolean;
+export function recordCachedCommentCheckerRelease(cacheDir: string): void;
 export function resolveCommentCheckerBinary(input: ResolveCommentCheckerBinaryInput): string | null;
 export function runCommentChecker(input: RunCommentCheckerInput, options: RunCommentCheckerOptions): Promise<CheckResult>;
+export function sendAndCloseStdin(stdin: {
+	on(event: "error", listener: (error: Error) => void): unknown;
+	end(chunk: string, callback: (error?: Error | null) => void): unknown;
+} | {
+	write(chunk: string): unknown;
+	end(): unknown;
+}, input: string): Promise<void>;

@@ -1,7 +1,10 @@
 import { afterAll, afterEach, describe, expect, setDefaultTimeout, test } from "bun:test"
 import { appendFile, cp, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
+
+import { PERSONA_ASSET_FILES } from "@oh-my-opencode/memory-core/personas"
 
 import {
   buildExtension,
@@ -9,6 +12,7 @@ import {
   resolveBunExecutable,
   toPortableBuildPath,
 } from "./build-extension.mjs"
+import { runtimePersonaSources } from "./persona-artifacts.mjs"
 
 const scriptDir = dirname(fileURLToPath(import.meta.url))
 const pluginRoot = join(scriptDir, "..")
@@ -19,7 +23,7 @@ let sharedBuildPromise = null
 // A focused run builds the six artifacts twice in ~14s, while the package suite shares CPU and disk
 // with other build/staging files. Keep the test bounded, but give the real two-build workload enough
 // headroom under suite contention instead of timing out before the freshness assertion runs.
-setDefaultTimeout(60_000)
+setDefaultTimeout(90_000)
 
 afterEach(async () => {
   await Promise.all(perTestRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
@@ -36,9 +40,11 @@ function outputPathsIn(root) {
     outputPath: join(root, "omo.js"),
     taskOutputPath: join(root, "omo-task.js"),
     memberOutputPath: join(root, "omo-member.js"),
-    memoryMcpOutputPath: join(root, "omo-memory-mcp.js"),
     supervisorOutputPath: join(root, "memory-run-supervisor.mjs"),
     advisorRuntimeOutputPath: join(root, "omo-init-deep-advisor.js"),
+    toolkitSdkOutputPath: join(root, "runtime", "agent-toolkit-sdk", "sdk.js"),
+    rollbackRuntimeOutputPath: join(root, "runtime", "rollback-migrate.js"),
+    computerUseOutputPath: join(root, "omo-computer-use.js"),
   }
 }
 
@@ -49,7 +55,7 @@ function outputPathsIn(root) {
  */
 async function sharedOutputs() {
   sharedBuildPromise ??= (async () => {
-    const root = await mkdtemp(join(repoRoot, ".build-extension-test-shared-"))
+    const root = await mkdtemp(join(tmpdir(), "omo-senpi-extension-test-shared-"))
     const paths = outputPathsIn(root)
     const build = await buildExtension(paths)
     return { root, ...paths, ...build }
@@ -59,13 +65,33 @@ async function sharedOutputs() {
 
 async function mutableOutputs() {
   const shared = await sharedOutputs()
-  const root = await mkdtemp(join(repoRoot, ".build-extension-test-"))
+  const root = await mkdtemp(join(tmpdir(), "omo-senpi-extension-test-"))
   perTestRoots.push(root)
   await cp(shared.root, root, { recursive: true })
   return { root, ...outputPathsIn(root), mainInputs: shared.mainInputs, taskInputs: shared.taskInputs }
 }
 
 describe("checkExtensionCurrent", () => {
+  test("#given the eval SDK build #when inputs and exports are inspected #then the standalone entry has no dependencies", async () => {
+    const outputs = await sharedOutputs()
+    expect(outputs.toolkitSdkInputs.some(input => input.endsWith("src/extension/agent-toolkit-sdk.ts"))).toBe(true)
+    expect(outputs.toolkitSdkInputs.filter(input => input.includes("node_modules/"))).toEqual([])
+    const sdk = await import(outputs.toolkitSdkOutputPath)
+    expect(Object.keys(sdk).sort()).toEqual(["SDK_VERSION", "ULW_LOOP_MANIFEST", "ULW_LOOP_OPERATIONS", "agentToolkit", "createAgentToolkit", "toolkitContextFromEnv"].sort())
+  })
+
+  test("#given a missing SDK artifact #when freshness is checked #then it reports that output", async () => {
+    const outputs = await mutableOutputs()
+    await rm(outputs.toolkitSdkOutputPath)
+    expect(await checkExtensionCurrent(outputs)).toMatchObject({ ok: false, reason: "missing-output", output: outputs.toolkitSdkOutputPath })
+  })
+
+  test("#given the rollback migration runtime #when built #then its store entry and migration event are present", async () => {
+    const outputs = await sharedOutputs()
+    expect(outputs.rollbackRuntimeInputs.some(input => input.endsWith("src/extension/rollback-migrate-runtime.ts"))).toBe(true)
+    expect(await readFile(outputs.rollbackRuntimeOutputPath, "utf8")).toContain("host_session_migrated")
+  })
+
   test("#given the host platform #when resolving the Bun executable #then Windows bypasses the command shell", () => {
     expect(resolveBunExecutable("win32")).toBe("bun.exe")
     expect(resolveBunExecutable("darwin")).toBe("bun")
@@ -77,11 +103,10 @@ describe("checkExtensionCurrent", () => {
     const outputs = await sharedOutputs()
 
     // when
-    const mcp = await readFile(outputs.memoryMcpOutputPath, "utf8")
     const supervisor = await readFile(outputs.supervisorOutputPath, "utf8")
 
     // then (Node's ESM loader strips a shebang only at byte 0; a marker above it breaks startup)
-    for (const text of [mcp, supervisor]) {
+    for (const text of [supervisor]) {
       expect(text.startsWith("#!/usr/bin/env node\n")).toBe(true)
       expect(text.indexOf("\n// omo:")).toBeGreaterThan(0)
     }
@@ -89,10 +114,10 @@ describe("checkExtensionCurrent", () => {
     const check = await checkExtensionCurrent({
       outputPath: outputs.outputPath,
       memberOutputPath: outputs.memberOutputPath,
-      memoryMcpOutputPath: outputs.memoryMcpOutputPath,
       supervisorOutputPath: outputs.supervisorOutputPath,
     })
-    expect(check.ok).toBe(true)
+    // Compare the whole result so a failure names the stale artifact instead of printing "false".
+    expect(check).toMatchObject({ ok: true })
   })
 
   test("#given an empty output directory #when extensions are built #then all runtime personas match their sources", async () => {
@@ -102,15 +127,23 @@ describe("checkExtensionCurrent", () => {
       ["reflection-persona.md", join(repoRoot, "packages", "memory-core", "src", "reflection", "assets", "reflection-persona.md")],
       ["dream-persona.md", join(repoRoot, "packages", "memory-core", "src", "reflection", "assets", "dream-persona.md")],
       ["facts-persona.md", join(repoRoot, "packages", "memory-core", "src", "facts", "assets", "facts-persona.md")],
-      // The memorian gate loads its persona from beside the BUNDLE, so an unstaged asset makes
+      // The kibitzer gate loads its persona from beside the BUNDLE, so an unstaged asset makes
       // every live gate launch fail with ENOENT while every source-reading unit test still passes.
-      ["memorian-persona.md", join(repoRoot, "packages", "memory-core", "src", "recall", "assets", "memorian-persona.md")],
+      ["kibitzer-persona.md", join(repoRoot, "packages", "memory-core", "src", "recall", "assets", "kibitzer-persona.md")],
     ]
 
     // then
     for (const [name, source] of personas) {
       expect(await readFile(join(dirname(outputs.outputPath), name), "utf8")).toBe(await readFile(source, "utf8"))
     }
+  })
+
+  test("#given the runtime persona manifest #when staging sources are listed #then the staged names match it", () => {
+    // given / when
+    const staged = runtimePersonaSources(repoRoot).map(([name]) => name)
+
+    // then
+    expect(staged).toEqual([...PERSONA_ASSET_FILES])
   })
 
   test("#given platform-specific source paths #when normalized #then build markers use portable separators", () => {
@@ -218,6 +251,25 @@ describe("checkExtensionCurrent", () => {
       .toBe(true)
   })
 
+  test("#given the split extension build #when metafile inputs are inspected #then the computer-use implementation lives only in its lazy entry", async () => {
+    // given / when
+    const { mainInputs, computerUseInputs } = await sharedOutputs()
+    const inMain = (suffix) => mainInputs.some((input) => toPortableBuildPath(input).endsWith(suffix))
+    const inRuntime = (suffix) => computerUseInputs.some((input) => toPortableBuildPath(input).endsWith(suffix))
+
+    // then
+    for (const implementation of [
+      "packages/senpi-desktop-service/src/index.ts",
+      "packages/senpi-desktop-engine/src/index.ts",
+      "packages/senpi-desktop-tool/src/activation.ts",
+      "packages/omo-senpi/src/components/computer-use/engine-status.ts",
+    ]) {
+      expect(inMain(implementation), implementation).toBe(false)
+      expect(inRuntime(implementation), implementation).toBe(true)
+    }
+    expect(inMain("packages/senpi-desktop-tool/src/registration.ts")).toBe(true)
+  })
+
   test("#given a packaged task import map #when generated artifacts are inspected #then the main bundle resolves its task sidecar", async () => {
     const outputs = await sharedOutputs()
     const main = await readFile(outputs.outputPath, "utf8")
@@ -226,6 +278,12 @@ describe("checkExtensionCurrent", () => {
 
     expect(main).toContain('import("#omo-task-runtime")')
     expect(task).toMatch(/^\/\/ omo:[A-Za-z0-9_-]{43}:[A-Za-z0-9_-]{43}/)
-    expect(manifest.imports).toEqual({ "#omo-task-runtime": "./extensions/omo-task.js" })
+    expect(main).not.toContain('import("#omo-agent-toolkit-runtime")')
+    expect(manifest.imports).not.toHaveProperty("#omo-agent-toolkit-runtime")
+    expect(manifest.imports).toEqual({
+      "#omo-task-runtime": "./extensions/omo-task.js",
+      "#omo-computer-use-runtime": "./extensions/omo-computer-use.js",
+      "#omo-agent-toolkit-sdk": "./runtime/agent-toolkit-sdk/sdk.js",
+    })
   })
 })

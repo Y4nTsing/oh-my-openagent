@@ -1,15 +1,21 @@
-import { existsSync } from "node:fs"
-import { delimiter, join } from "node:path"
+import { spawnSync } from "node:child_process"
+import { existsSync, realpathSync } from "node:fs"
+import { delimiter, isAbsolute, join, relative, sep } from "node:path"
 import { spawnNode } from "./child-process.js"
+import { doctorCoverageLines } from "./category-coverage.js"
+import { doctorComputerUseLines } from "./computer-use-doctor.js"
+import { runDaemonCommand } from "./daemon.js"
 import { runDoctor } from "./doctor.js"
+import { ensureEnginePrepared } from "./engine-prepare.js"
 import { migrateLegacyBunGlobalManifest } from "./legacy-bun-global-migration.js"
 import { adoptLegacyFlatState, canonicalAgentDir } from "./agent-dir.js"
-import { nearestNodeBin, packageManifest, packageRoot, readJson, resolveSenpi, updateTarget } from "./package-paths.js"
+import { nearestNodeBin, packageManifest, packageRoot, readJson, releaseBanner, releaseChannel, resolveSenpi, updateTarget } from "./package-paths.js"
+import { runSelfUpdate } from "./self-update.js"
 import { detectHarnesses } from "./setup-detect.js"
 import { readSetupSuggestionCache, spawnSetupSuggestionRefresh } from "./setup-detect-cache.js"
 import { printSetupReport } from "./setup-report.js"
 
-const earlyCommands = new Set(["install", "remove", "list", "config", "auth", "app-server"])
+const earlyCommands = new Set(["install", "remove", "list", "config", "auth", "app-server", "host"])
 const selfUpdateTargets = new Set(["self", "senpi", "omo"])
 // Updating extensions or model catalogs is the engine's job; everything else under `update`
 // would try to replace the pinned engine, so the launcher answers it instead.
@@ -27,8 +33,23 @@ function isSelfUpdate(args) {
 // environment prefix is read first, what goes on the wire, and which channel to check for
 // updates. The engine consumes this once and scrubs it, so nested engine processes are
 // unaffected.
+function pluginChangelogSource() {
+  try {
+    const pluginRoot = join(packageRoot, "plugin")
+    const changelogPath = join(pluginRoot, "CHANGELOG.md")
+    if (!existsSync(changelogPath)) return undefined
+    const version = readJson(join(pluginRoot, "package.json")).version
+    return typeof version === "string" && version ? { path: changelogPath, version } : { path: changelogPath }
+  } catch {
+    return undefined
+  }
+}
+
 function brandProfile() {
   const update = updateTarget()
+  // The changelog source is advisory: a missing plugin manifest or file must disable
+  // startup notes, never fail the launch.
+  const changelog = pluginChangelogSource()
   return {
     name: "OmO",
     command: "omo",
@@ -40,9 +61,10 @@ function brandProfile() {
     envPrefix: "OMO",
     userAgent: "omo",
     originator: "omo",
+    ...(changelog ? { changelog } : {}),
     update: {
       packageName: "omo-ai",
-      distTag: "beta",
+      distTag: releaseChannel(),
       command: update.command,
       changelogUrl: "https://github.com/code-yeongyu/oh-my-openagent/releases",
     },
@@ -57,11 +79,35 @@ function engineVersion() {
   }
 }
 
+function canonicalPath(path) {
+  try {
+    return realpathSync.native(path)
+  } catch {
+    return path
+  }
+}
+
+function containsPath(root, target) {
+  const rel = relative(canonicalPath(root), canonicalPath(target))
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))
+}
+
+// A compiled omo session exports its own payload as the brand-scoped package dir, and every shell it
+// spawns inherits that. The engine reads these names before the legacy PI_PACKAGE_DIR, so a release
+// omo started from such a shell would run on the foreign payload. A deliberate relocation names this
+// install's engine and survives; a root that does not contain the engine belongs to another install.
+function dropForeignPackageDirs(env, senpiRoot) {
+  for (const name of ["OMO_PACKAGE_DIR", "SENPI_PACKAGE_DIR"]) {
+    const root = env[name]
+    if (root && !containsPath(root, senpiRoot)) delete env[name]
+  }
+}
+
 function senpiEnvironment(senpiRoot) {
   const env = { ...process.env }
   delete env.OMO_BIN
   delete env.SENPI_BIN
-  env.OMO_AGENT_TOOLKIT_BIN = join(packageRoot, "bin", "omo-agent-toolkit.js")
+  dropForeignPackageDirs(env, senpiRoot)
   // One directory for every surface. The legacy name travels too, so a bare senpi spawned by a
   // tool inherits the same state instead of falling back to its own home.
   const agentDir = canonicalAgentDir(env)
@@ -89,12 +135,31 @@ function senpiEnvironment(senpiRoot) {
   return env
 }
 
-async function spawnSenpi(args, withExtension) {
+function preparedSenpi() {
   const senpi = resolveSenpi()
+  ensureEnginePrepared({
+    senpiRoot: senpi.packageRoot,
+    omoVersion: packageManifest().version,
+    reinstallCommand: updateTarget().command,
+  })
+  return senpi
+}
+
+async function spawnSenpi(args, withExtension) {
+  const senpi = preparedSenpi()
   const finalArgs = withExtension
     ? ["--extension", join(packageRoot, "plugin"), ...args]
     : args
-  await spawnNode(senpi.cliPath, finalArgs, { env: senpiEnvironment(senpi.packageRoot) })
+  const env = senpiEnvironment(senpi.packageRoot)
+  if (process.platform !== "win32" && typeof process.execve === "function") {
+    try {
+      process.execve(process.execPath, [process.execPath, senpi.cliPath, ...finalArgs], env)
+      return
+    } catch {
+      // A failed replacement still uses the signal-aware child path below.
+    }
+  }
+  await spawnNode(senpi.cliPath, finalArgs, { env })
 }
 
 function isInteractiveDefault(args) {
@@ -130,16 +195,83 @@ function setupSuggestionForLaunch() {
   return cached.suggestion === true
 }
 
+/**
+ * One call into the engine's host CLI. It prints a single JSON line and exits, so the output is
+ * captured rather than inherited - `omo daemon` has to read the engine's answer to turn it into
+ * an exit code, and `spawnSync` is honest about a call that is expected to be this short.
+ */
+export function engineHostCall(engineArgs, options) {
+  const senpi = preparedSenpi()
+  const result = spawnSync(process.execPath, [senpi.cliPath, ...engineArgs], {
+    encoding: "utf8",
+    env: { ...senpiEnvironment(senpi.packageRoot), ...options.env },
+    windowsHide: true,
+  })
+  return { exitCode: result.status ?? 1, stdout: result.stdout ?? "", stderr: result.stderr ?? "" }
+}
+
+export function rollbackMigrateCall(request) {
+  const runtime = join(packageRoot, "plugin", "runtime", "rollback-migrate.js")
+  const result = spawnSync(process.execPath, [runtime], {
+    encoding: "utf8",
+    input: JSON.stringify(request),
+    env: senpiEnvironment(preparedSenpi().packageRoot),
+    windowsHide: true,
+  })
+  if (result.status !== 0) {
+    throw new Error(result.stderr?.trim() || `rollback migration runtime exited ${result.status ?? 1}`)
+  }
+  return JSON.parse(result.stdout)
+}
+
 export async function runLauncher(args = process.argv.slice(2)) {
   migrateLegacyBunGlobalManifest()
   reportLegacyFlatAdoption()
   const command = args[0]
+  // The toolkit CLI is no longer part of the Native payload; the loop is driven in-process by the
+  // eval SDK the extension publishes. Report that plainly instead of failing on a missing file.
   if (command === "ulw-loop") {
-    await spawnNode(join(packageRoot, "plugin", "runtime", "agent-toolkit", "ulw-loop", "cli.js"), args.slice(1))
+    console.error('omo ulw-loop is unavailable in this build: use the agent toolkit SDK from an eval js cell: const { agentToolkit } = await import(`${env("OMO_AGENT_TOOLKIT_SDK_ROOT")}/sdk.js`); print(await agentToolkit.status()) (Codex keeps the standalone CLI).')
+    process.exitCode = 2
+    return
+  }
+  // The daemon is the engine's to run; omo only supplies the launch spec, the policy from
+  // omo.json, and an exit code the caller can branch on.
+  if (command === "daemon") {
+    const outcome = runDaemonCommand(args.slice(1), {
+      engine: { run: engineHostCall },
+      migration: { run: rollbackMigrateCall },
+      pluginRoot: join(packageRoot, "plugin"),
+      agentDir: canonicalAgentDir(),
+      env: process.env,
+      stdout: process.stdout,
+      stderr: process.stderr,
+      platform: process.platform,
+    })
+    // `omo daemon attach <launch args>`: the daemon is reachable, so this becomes a normal launch
+    // whose environment points the engine at the shared socket instead of starting its own.
+    if (typeof outcome === "object") {
+      const senpi = preparedSenpi()
+      await spawnNode(senpi.cliPath, ["--extension", join(packageRoot, "plugin"), ...outcome.args], {
+        env: { ...senpiEnvironment(senpi.packageRoot), ...outcome.env },
+      })
+      return
+    }
+    process.exitCode = outcome
     return
   }
   if (command === "doctor") {
-    runDoctor(await detectHarnesses(), args.slice(1))
+    const [categoryCoverage, computerUse] = args[1] === "--reap"
+      ? [[], []]
+      : await Promise.all([
+          doctorCoverageLines({ agentDir: canonicalAgentDir() }),
+          doctorComputerUseLines(),
+        ])
+    runDoctor(await detectHarnesses(), args.slice(1), {
+      daemonEngine: { run: engineHostCall },
+      categoryCoverage,
+      computerUse,
+    })
     return
   }
   if (command === "setup") {
@@ -153,11 +285,15 @@ export async function runLauncher(args = process.argv.slice(2)) {
     return
   }
   // The engine is pinned by this package, so a self-update would break the pairing; every
-  // self-update spelling is answered with the command that actually updates the product.
+  // self-update spelling runs the product command instead of asking senpi to move the pin.
   if (isSelfUpdate(args)) {
-    const update = updateTarget()
-    console.log(`omo is updated via ${update.manager}: ${update.command}`)
-    process.exitCode = 0
+    process.exitCode = await runSelfUpdate(args)
+    return
+  }
+  // app-server takes the plugin after its subcommand: a leading --extension never reaches the
+  // engine's app-server dispatch. It loads into every thread, including the daemon's.
+  if (command === "app-server") {
+    await spawnSenpi(args.includes("--no-extensions") ? args : [...args, "--extension", join(packageRoot, "plugin")], false)
     return
   }
   if (earlyCommands.has(command) || command === "update") {
@@ -165,7 +301,7 @@ export async function runLauncher(args = process.argv.slice(2)) {
     return
   }
   if (isInteractiveDefault(args)) {
-    console.error(`omo (omo-ai beta ${packageManifest().version})`)
+    console.error(releaseBanner())
     if (process.stdout.isTTY === true && setupSuggestionForLaunch()) {
       console.error("omo: sibling credentials detected; run `omo setup` to review them")
     }

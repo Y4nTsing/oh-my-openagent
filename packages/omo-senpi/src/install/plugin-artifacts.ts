@@ -3,18 +3,20 @@ import { constants } from "node:fs"
 import { access, readFile, stat } from "node:fs/promises"
 import { dirname, join } from "node:path"
 
+import { PERSONA_ASSET_FILES } from "@oh-my-opencode/memory-core/personas"
+
 import { isRecord } from "./senpi-settings"
 
-const REQUIRED_PLUGIN_ARTIFACTS = [
+export const REQUIRED_PLUGIN_ARTIFACTS: readonly string[] = [
   join("extensions", "omo.js"),
   join("extensions", "omo-task.js"),
+  join("extensions", "omo-computer-use.js"),
+  join("extensions", "assets.generated.json"),
   join("extensions", "omo-member.js"),
   join("extensions", "memory-run-supervisor.mjs"),
-  join("extensions", "reflection-persona.md"),
-  join("extensions", "dream-persona.md"),
-  join("extensions", "facts-persona.md"),
-  join("extensions", "memorian-persona.md"),
+  ...PERSONA_ASSET_FILES.map((filename) => join("extensions", filename)),
   join("skills", "ast-grep", "SKILL.md"),
+  join("skills", "browser", "SKILL.md"),
   join("skills", "coding-agent-sessions", "SKILL.md"),
   join("skills", "debugging", "SKILL.md"),
   join("skills", "frontend", "SKILL.md"),
@@ -32,11 +34,9 @@ const REQUIRED_PLUGIN_ARTIFACTS = [
   join("skills", "ulw-plan", "SKILL.md"),
   join("skills", "ulw-research", "SKILL.md"),
   join("skills", "visual-qa", "SKILL.md"),
+  join("skills-conditional", "x-search", "SKILL.md"),
+  join("runtime", "agent-toolkit-sdk", "sdk.js"),
   join("runtime", "ast-grep-mcp", "cli.js"),
-  join("runtime", "agent-toolkit", "cli.js"),
-  join("runtime", "agent-toolkit", "ulw-loop", "cli.js"),
-  join("runtime", "agent-toolkit", "omo-agent-toolkit"),
-  join("runtime", "agent-toolkit", "omo-agent-toolkit.cmd"),
   join("runtime", "lsp-daemon", "dist", "cli.js"),
   join("runtime", "lsp-daemon", "dist", "index.js"),
   join("runtime", "lsp-daemon", "dist", "index.d.ts"),
@@ -45,7 +45,9 @@ const REQUIRED_PLUGIN_ARTIFACTS = [
   join("runtime", "lsp-daemon", "dist", "package.json"),
   join("runtime", "lsp-daemon", "dist", ".omo-runtime-manifest.json"),
   join("scripts", "install.mjs"),
-] as const
+  // The task daemon's launch spec: without it `omo daemon run` fails closed on every install.
+  "daemon-launch-spec.json",
+]
 
 export async function ensurePluginArtifacts(context: {
   readonly allowBuild: boolean
@@ -61,7 +63,7 @@ export async function ensurePluginArtifacts(context: {
     await context.runCommand("node", [join(context.pluginPath, "scripts", "build-install.mjs")], { cwd: context.repoRoot })
     await context.runCommand("node", [join(context.pluginPath, "scripts", "stage-lsp-daemon-runtime.mjs")], { cwd: context.repoRoot })
     await context.runCommand("node", [join(context.pluginPath, "scripts", "stage-ast-grep-mcp-runtime.mjs")], { cwd: context.repoRoot })
-    await context.runCommand("node", [join(context.pluginPath, "scripts", "stage-agent-toolkit.mjs")], { cwd: context.repoRoot })
+    await context.runCommand("node", [join(context.pluginPath, "scripts", "stage-x-search-skill.mjs")], { cwd: context.repoRoot })
   }
 
   if (await hasMissingPluginArtifact(context.pluginPath)) {

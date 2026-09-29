@@ -3,14 +3,16 @@ import { existsSync, linkSync, mkdirSync, readFileSync, renameSync, rmSync, writ
 import { join } from "node:path"
 
 import { withTaskRecordLock } from "../store/record-lock"
-import { delay } from "./context"
+import { waitForAdmissionLease, wakeAdmissionLeaseWaiters } from "./admission-lease-wait"
 
 /**
  * Crash-safe per-parent-session admission lease (`<stateDir>/locks/session-<parentSessionId>.lock`).
  *
- * Why not `withTaskRecordLock` for the batch itself: that primitive stale-reclaims after 5s by
- * mtime because it guards sub-10ms record writes (store/record-lock.ts:5-9). A batch admission
- * section is longer-lived, so a slow-but-alive holder would be reclaimed underneath itself. This
+ * Why not `withTaskRecordLock` for the batch itself: that primitive is a mutex for sub-10ms record
+ * writes. It is taken from a holder only once the holder is proven dead (store/lock-owner.ts), and a
+ * waiter gives up after one holder keeps it for 1s - blocking its thread meanwhile in the sync
+ * variant. A batch admission section is longer-lived, so waiters behind it would time out, and a
+ * holder that is alive but no longer renewing could never be taken over. This
  * lease is a RENEWABLE OWNER-TOKEN lease instead: the body is `{pid, token, renewed_at}`, the
  * holder refreshes `renewed_at` on a timer, and `token` (minted fresh per acquisition) is the
  * fencing token. Takeover is a compare-and-swap that re-validates BOTH the observed token and the
@@ -69,29 +71,36 @@ export function resolveAdmissionLeaseTiming(overrides: Partial<AdmissionLeaseTim
   }
 }
 
-export async function acquireSessionAdmissionLease(
+export function acquireSessionAdmissionLease(
   stateDir: string,
   parentSessionId: string,
   overrides: Partial<AdmissionLeaseTiming> = {},
 ): Promise<AcquireAdmissionLeaseResult> {
-  const timing = resolveAdmissionLeaseTiming(overrides)
-  const path = admissionLeasePath(stateDir, parentSessionId)
-  mkdirSync(join(stateDir, "locks"), { recursive: true })
-  const token = randomBytes(16).toString("hex")
-  const startedAt = Date.now()
-
-  for (;;) {
-    if (tryCreateLease(path, { pid: process.pid, token, renewed_at: Date.now() })) {
-      return { kind: "acquired", lease: startHolder(path, token, timing) }
+  try {
+    const timing = resolveAdmissionLeaseTiming(overrides)
+    const path = admissionLeasePath(stateDir, parentSessionId)
+    mkdirSync(join(stateDir, "locks"), { recursive: true })
+    const token = randomBytes(16).toString("hex")
+    const startedAt = Date.now()
+    const attempt = (): AcquireAdmissionLeaseResult | undefined => {
+      for (;;) {
+        if (tryCreateLease(path, { pid: process.pid, token, renewed_at: Date.now() })) {
+          return { kind: "acquired", lease: startHolder(path, token, timing) }
+        }
+        const observed = readLeaseBody(path)
+        if (observed === "missing") continue // released between create and read
+        const stale = observed === "corrupt" || Date.now() - observed.renewed_at > timing.staleMs
+        if (stale && tryTakeover(path, observed, token, timing.staleMs)) {
+          return { kind: "acquired", lease: startHolder(path, token, timing) }
+        }
+        return Date.now() - startedAt >= timing.acquireTimeoutMs ? { kind: "contended" } : undefined
+      }
     }
-    const observed = readLeaseBody(path)
-    if (observed === "missing") continue // released between our create attempt and this read
-    const stale = observed === "corrupt" || Date.now() - observed.renewed_at > timing.staleMs
-    if (stale && tryTakeover(path, observed, token, timing.staleMs)) {
-      return { kind: "acquired", lease: startHolder(path, token, timing) }
-    }
-    if (Date.now() - startedAt >= timing.acquireTimeoutMs) return { kind: "contended" }
-    await delay(timing.retryMs)
+    // Register the waiter before the first attempt so a same-tick release cannot be lost between
+    // a failed tryCreate and waitForAdmissionLease. The waiter retries immediately after arming.
+    return waitForAdmissionLease(path, timing.retryMs, attempt)
+  } catch (error) {
+    return Promise.reject(error)
   }
 }
 
@@ -166,14 +175,19 @@ function startHolder(path: string, token: string, timing: AdmissionLeaseTiming):
     },
     release: () => {
       clearInterval(timer)
+      let released = false
       try {
         withTaskRecordLock(path, () => {
           const fresh = readLeaseBody(path)
-          if (fresh !== "missing" && fresh !== "corrupt" && fresh.token === token) rmSync(path, { force: true })
+          if (fresh !== "missing" && fresh !== "corrupt" && fresh.token === token) {
+            rmSync(path, { force: true })
+            released = true
+          }
         })
       } catch {
         // mutex timeout on the way out: the lease goes stale and a waiter takes it over
       }
+      if (released) wakeAdmissionLeaseWaiters(path)
     },
   }
 }

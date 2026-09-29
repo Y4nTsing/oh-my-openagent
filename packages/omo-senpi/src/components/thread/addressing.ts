@@ -166,6 +166,9 @@ function gitWorktreeRoot(dir: string): string | null {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
       timeout: 5000,
+      // git.exe is console-subsystem: without this each root lookup flashes a console window that
+      // Windows foregrounds, stealing the user's focus (#8501).
+      windowsHide: true,
     })
     const trimmed = output.trim()
     return trimmed.length === 0 ? null : trimmed
@@ -200,6 +203,21 @@ function sameWorkspace(entryCwd: string, callerRoot: string, rootOf: (dir: strin
  * the daemon knows, restricted to the caller's workspace unless `all_scope`
  * widens it. Errors come back as data, never throws.
  */
+/**
+ * The entries that belong to the caller's workspace, judged exactly as the scoped name ladder in
+ * `resolveTarget` judges them. Without a caller root nothing is in scope: listing every workspace
+ * under a "workspace" label is what `all_scope` exists to make explicit.
+ */
+export function workspaceEntries(
+  entries: readonly ThreadAddressEntry[],
+  callerWorkspaceRoot: string | undefined,
+): ThreadAddressEntry[] {
+  const callerRoot = typeof callerWorkspaceRoot === "string" ? callerWorkspaceRoot.trim() : ""
+  if (callerRoot.length === 0) return []
+  const rootResolver = makeRootResolver()
+  return entries.filter((entry) => sameWorkspace(entry.cwd, callerRoot, rootResolver))
+}
+
 export function resolveTarget(
   entries: readonly ThreadAddressEntry[],
   target: string,

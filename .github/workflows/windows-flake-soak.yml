@@ -17,8 +17,10 @@ on:
           - reply-listener
           - dag-race
           - memfs-restore
+          - memory-two-process
           - senpi-overflow
           - full-shard-2
+          - member-residency
       iterations:
         description: Number of identical iterations to run
         required: true
@@ -47,7 +49,7 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: "1.4.0"
+          bun-version: "1.4.2"
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -129,11 +131,23 @@ jobs:
                 Arguments = [string[]]@("test", "packages/omo-senpi/src/components/memory/commands/memfs-extra.test.ts")
               }
             )
+            "memory-two-process" = @(
+              [ordered]@{
+                Phase = "test"
+                Arguments = [string[]]@("test", "packages/memory-core/src/concurrency/two-process.test.ts")
+              }
+            )
             "senpi-overflow" = @()
+            "member-residency" = @(
+              [ordered]@{
+                Phase = "test"
+                Arguments = [string[]]@("test", "packages/senpi-task/src/team/member-extension/residency.test.ts", "packages/senpi-task/src/runners/rpc-host/handle-detached.test.ts")
+              }
+            )
             "full-shard-2" = @(
               [ordered]@{
                 Phase = "quarantine"
-                Arguments = [string[]]@("test", "packages/senpi-task/src/runners/rpc-process.windows.test.ts", "packages/senpi-task/src/__adversarial__/chaos-bench.test.ts", "packages/omo-codex/src/install/install-codex-legacy-agent-purge.test.ts", "script/codex-installer-version.test.ts", "packages/shared-skills/provenance-gate.test.ts", "packages/omo-codex/src/install/install-codex-mcp-manifest.test.ts", "packages/senpi-task/src/dag/scheduler.test.ts", "packages/omo-native/test/payload.test.ts", "script/build-omo-binary.test.ts")
+                Arguments = [string[]]@("test", "packages/senpi-task/src/runners/rpc-process.windows.test.ts", "packages/senpi-task/src/__adversarial__/chaos-bench.test.ts", "packages/omo-codex/src/install/install-codex-legacy-agent-purge.test.ts", "script/codex-installer-version.test.ts", "packages/shared-skills/provenance-gate.test.ts", "packages/omo-codex/src/install/install-codex-mcp-manifest.test.ts", "packages/senpi-task/src/dag/scheduler.test.ts", "packages/omo-native/test/payload.test.ts", "script/build-omo-binary.test.ts", "packages/senpi-task/src/team/member-extension/residency.test.ts", "script/omob-refresh.test.ts", "script/release-version.test.ts")
               }
               [ordered]@{
                 Phase = "remainder"
